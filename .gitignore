@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual envs (we use an external conda env, but ignore any local ones)
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage / type caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Node / frontend (Phases 4-5)
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Local engine binaries (rely on system stockfish on PATH)
+stockfish/
+*.nnue
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs / scratch
+*.log
+/tmp/

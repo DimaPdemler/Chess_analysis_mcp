@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "chess": {
+      "command": "/opt/miniconda3/envs/chess-review/bin/python",
+      "args": ["-m", "server.mcp_server"],
+      "env": {
+        "STOCKFISH_PATH": "/usr/local/bin/stockfish",
+        "CHESS_USERNAME": "thedarktintin"
+      }
+    }
+  }
+}

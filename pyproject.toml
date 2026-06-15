@@ -1,0 +1,32 @@
+[project]
+name = "chess-review-mcp"
+version = "0.1.0"
+description = "Local chess review tool: PGN -> Stockfish analysis -> mistakes explained in words, driven from Claude Code via MCP."
+requires-python = ">=3.11"
+dependencies = [
+    "python-chess>=1.999",
+    "mcp[cli]>=1.27",
+    "fastapi>=0.137",
+    "uvicorn>=0.49",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# NOTE: This repo uses the existing conda env, NOT uv.
+#   interpreter: /opt/miniconda3/envs/chess-review/bin/python
+#   install (only if deps are missing):
+#     /opt/miniconda3/envs/chess-review/bin/pip install -e ".[dev]"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["server"]
