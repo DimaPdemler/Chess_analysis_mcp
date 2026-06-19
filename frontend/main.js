@@ -511,6 +511,7 @@ async function sendChat(ev) {
         last_move: chatMove, // the move in question → "why is this bad?"
         move_fen: chatFen, // the position that move was played from
         session_id: chatSession,
+        use_profile: $("profile-toggle").checked, // personalize with cross-game history
       }),
     }).then((r) => r.json());
     pending.remove();

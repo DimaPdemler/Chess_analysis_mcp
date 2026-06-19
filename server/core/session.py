@@ -33,6 +33,11 @@ class MoveReview(BaseModel):
     best_line_san: list[str] = Field(default_factory=list)
     accuracy: float
     comment: str = ""  # engine-grounded prose explanation (mistakes only); no LLM/extra engine cost
+    # Clock context (seconds), parsed from PGN [%clk] when present — both None if the PGN has no
+    # clocks. clock_after = my remaining time after this move; opp_clock = opponent's remaining
+    # at their previous move. Powers the time-trouble motif.
+    clock_after: Optional[float] = None
+    opp_clock: Optional[float] = None
 
 
 class ReviewSession(BaseModel):

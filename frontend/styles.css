@@ -243,7 +243,8 @@ main {
 
 .chat-panel { border-top: 1px solid #000; padding-top: 12px; }
 .chat-panel h2 { color: var(--text); }
-.chat-hint { margin: 0 0 8px; }
+.chat-hint { margin: 0 0 6px; }
+.chat-profile-toggle { display: inline-block; margin: 0 0 10px; font-size: 12.5px; color: var(--muted); }
 
 .chat-messages {
   display: flex;
@@ -296,20 +297,31 @@ main {
 .chat-form { display: flex; gap: 6px; }
 .chat-form input {
   flex: 1;
-  background: #14130f;
-  border: 1px solid #000;
-  border-radius: 4px;
+  background: #1d1b16;
+  border: 1px solid #4a4636;
+  border-radius: 6px;
   color: var(--text);
-  padding: 7px 9px;
+  padding: 8px 11px;
   font-size: 13.5px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.chat-form input::placeholder { color: #8a8472; }
+.chat-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(98, 153, 36, 0.25);
 }
 .chat-form button {
   background: var(--accent);
   color: #fff;
   border: none;
-  border-radius: 4px;
-  padding: 7px 14px;
+  border-radius: 6px;
+  padding: 7px 13px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 15px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .chat-form button:disabled { opacity: 0.5; cursor: default; }

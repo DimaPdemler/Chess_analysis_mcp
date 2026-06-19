@@ -85,13 +85,13 @@ def resolve_player(headers: dict[str, str], player: str) -> str:
     p = (player or "auto").lower()
     if p in ("white", "black"):
         return p
-    # auto: match the configured username against the PGN headers.
-    name = config.USERNAME.lower().strip()
-    if name:
-        if headers.get("White", "").lower().strip() == name:
-            return "white"
-        if headers.get("Black", "").lower().strip() == name:
-            return "black"
+    # auto: match any of my handles (CHESS_USERNAME + CHESS_ALIASES) against the PGN headers.
+    mine = {config.USERNAME.lower().strip()} | {a for _, a in config.USERNAME_ALIASES}
+    mine.discard("")
+    if headers.get("White", "").lower().strip() in mine:
+        return "white"
+    if headers.get("Black", "").lower().strip() in mine:
+        return "black"
     return "white"
 
 
@@ -170,13 +170,18 @@ def analyze_game(
     thresholds = thresholds_for_elo(review_elo)
     depth = depth or _depth_for_elo(review_elo)
 
-    # Replay the mainline, collecting (board_before, move) pairs. We ignore any embedded
-    # comments / NAGs / variations by only walking mainline_moves().
+    # Replay the mainline, collecting (board_before, move) pairs plus each move's remaining
+    # clock from [%clk] comments (None when the PGN has no clocks). We still ignore NAGs and
+    # variations by only following the first variation (== the mainline).
     board = game.board()
     steps: list[tuple[chess.Board, chess.Move]] = []
-    for move in game.mainline_moves():
-        steps.append((board.copy(stack=False), move))
-        board.push(move)
+    clocks: list[float | None] = []  # remaining seconds for the side that just moved, per ply
+    node = game
+    while node.variations:
+        node = node.variations[0]
+        steps.append((board.copy(stack=False), node.move))
+        clocks.append(node.clock())
+        board.push(node.move)
     final_board = board
 
     # Evaluate every position once: the position before each move, plus the final one.
@@ -254,6 +259,8 @@ def analyze_game(
             best_line_san=best_line_san,
             accuracy=round(acc, 1),
             comment=comment,
+            clock_after=clocks[i],
+            opp_clock=clocks[i - 1] if i >= 1 else None,
         )
         all_my_moves.append(review)
 

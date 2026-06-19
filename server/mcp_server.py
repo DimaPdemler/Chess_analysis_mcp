@@ -10,12 +10,15 @@ Run as the MCP stdio server:
 """
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from server import config
 from server.core import engine
+from server.core import history
+from server.core import lifecycle
 from server.core import lines
 from server.core.game_analysis import analyze_game as _analyze_game
 from server.core import session as session_mod
@@ -49,12 +52,22 @@ def analyze_game(
     and a `fen_before` usable with `get_engine_line`. `review_elo`/`thresholds` show the
     sensitivity used. The full result is stored in the shared session the web board reads.
     """
+    lifecycle.touch()
     sess = _analyze_game(pgn, player=player, elo=elo, sensitivity=sensitivity)
     session_mod.set_session(sess)
 
     summary = session_mod.summarize_session(sess)
     board_url = f"http://{config.WEB_HOST}:{config.WEB_PORT}"
     summary["board_url"] = board_url
+    # Auto-open the board so a first-time user never depends on the URL being printed.
+    web_runner.open_board_once()
+    # Persist the game for personalised coaching. Best-effort: history must never break a review.
+    if config.HISTORY_ENABLED:
+        try:
+            rec = history.record_game(sess)
+            summary["player_id"] = rec.get("player_id")
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[chess-history] could not record game: {exc}", file=sys.stderr, flush=True)
     if sess.review_elo is not None:
         t = sess.thresholds or []
         sens = (
@@ -64,8 +77,10 @@ def analyze_game(
     else:
         sens = " Using default sensitivity (5/10/15% drops); no Elo found in the PGN."
     summary["note"] = (
-        f"Open the interactive board at {board_url} to replay each mistake and try "
-        f"alternatives. Or ask 'why was move N bad?' here and I'll use get_engine_line.{sens}"
+        f"The interactive board has been opened in the browser at {board_url} — always "
+        f"show this clickable link to the user on its own line so they can reopen it. "
+        f"Replay each mistake and try alternatives there, or ask 'why was move N bad?' "
+        f"here and I'll use get_engine_line.{sens}"
     )
     return summary
 
@@ -90,6 +105,7 @@ def get_engine_line(
         depth: Search depth (fixed for reproducibility). Defaults to 18.
         multipv: Number of alternative lines to return for `fen`.
     """
+    lifecycle.touch()
     return lines.engine_line(fen, move, depth, multipv)
 
 
@@ -100,10 +116,32 @@ def goto_mistake(index: int) -> dict:
     Use the `index` values from `analyze_game`'s mistake list. Returns the FEN one move
     before the mistake so narration (and the web board) stays in sync.
     """
+    lifecycle.touch()
     return session_mod.goto_core(index)
 
 
+@mcp.tool()
+def get_player_profile(player_id: Optional[str] = None) -> dict:
+    """Return a player's saved coaching profile: recurring patterns across all analysed games.
+
+    Aggregates the persisted game history into accuracy, win/loss/draw counts, mistake rates,
+    the most common mistake *motifs* (e.g. hung_piece, pawn_grab, missed_capture), which game
+    phase leaks the most win%, per-opening results, and the most recent games. Use this to give
+    personalised, trend-aware coaching ("you keep hanging pieces in the endgame") instead of
+    judging a single game in isolation.
+
+    Args:
+        player_id: Whose profile to load. Omit to use the player from the most recently
+            analysed game. One person's several lichess/chess.com accounts are folded into a
+            single profile via the identities.json alias map. With no history yet, the result
+            includes `known_players` you can pick from.
+    """
+    lifecycle.touch()
+    return history.get_profile(player_id)
+
+
 def main() -> None:
+    lifecycle.start_watchdog()  # self-terminate after CHESS_SESSION_TTL of inactivity
     if config.WEB_AUTOSTART:
         web_runner.start_in_thread()
     try:

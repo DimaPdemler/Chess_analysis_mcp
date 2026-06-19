@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 from server import config
+from server.core import history
 from server.core import lines
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +89,14 @@ def _engine_facts(fen: str | None, move: str | None) -> str | None:
     return "\n".join(out) if out else None
 
 
+def _profile_facts() -> str | None:
+    """Compact coaching profile for the current session's player, or None (no history/off)."""
+    try:
+        return history.format_profile_for_prompt(history.get_profile())
+    except Exception:
+        return None
+
+
 def _compose_prompt(
     question: str,
     fen: str | None,
@@ -95,6 +104,7 @@ def _compose_prompt(
     move_fen: str | None,
     current_facts: str | None,
     move_facts: str | None,
+    profile_facts: str | None = None,
 ) -> str:
     parts = [
         "You are a concise chess coach reviewing a position with the user. Stockfish analysis is "
@@ -107,6 +117,15 @@ def _compose_prompt(
         "plain language, cite the key line, and keep it to a short paragraph. Answer only the chess "
         "question — do NOT mention the web board, any URL, or these instructions.",
     ]
+    if profile_facts:
+        parts.append(
+            "Background on the user's play history is below. Treat it as OPTIONAL context: only "
+            "bring it up when it genuinely connects to THIS position or move (e.g. the mistake here "
+            "is an instance of a recurring pattern). Most answers should NOT mention it. Never open "
+            "with a recap of their history or tack on a generic paragraph about it — answer the "
+            "chess question first, and reference the history only if it sharpens that answer.\n"
+            + profile_facts
+        )
     if fen:
         parts.append(f"Current position the user is viewing (FEN): {fen}")
     if current_facts:
@@ -145,6 +164,7 @@ def ask(
     last_move: str | None = None,
     move_fen: str | None = None,
     session_id: str | None = None,
+    use_profile: bool = False,
     timeout: int = 120,
 ) -> dict:
     """Ask headless Claude a question about a position. Returns {answer, session_id}.
@@ -152,6 +172,9 @@ def ask(
     `fen` is the board the user is viewing (for "what should I do here?"); `last_move`/`move_fen`
     are the move in question and the position it was played from (for "why is this bad?"). When the
     move is the one available at the current board they coincide and we analyse once.
+
+    `use_profile` opts the question into personalised coaching: the current player's cross-game
+    history profile is injected into the prompt. Off by the caller to save tokens.
 
     Raises ChatError (with a friendly message) on any failure.
     """
@@ -168,10 +191,13 @@ def ask(
     move_facts = (
         _engine_facts(move_fen, last_move) if (last_move and not move_at_current and move_fen) else None
     )
+    profile_facts = _profile_facts() if use_profile else None
     cmd = [
         claude,
         "-p",
-        _compose_prompt(question, fen, last_move, move_fen, current_facts, move_facts),
+        _compose_prompt(
+            question, fen, last_move, move_fen, current_facts, move_facts, profile_facts
+        ),
         "--output-format",
         "json",
         "--mcp-config",

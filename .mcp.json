@@ -5,7 +5,8 @@
       "args": ["-m", "server.mcp_server"],
       "env": {
         "STOCKFISH_PATH": "/usr/local/bin/stockfish",
-        "CHESS_USERNAME": "thedarktintin"
+        "CHESS_USERNAME": "thedarktintin",
+        "CHESS_ALIASES": "thedarktintin2, your_other_handle"
       }
     }
   }

@@ -4,6 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Chess Review</title>
+    <!-- Chess Review favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#1f2733" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.base.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.brown.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9/assets/chessground.cburnett.css" />
@@ -67,11 +74,15 @@
           <p class="muted chat-hint">
             Asks Claude about the current board position (uses your Claude subscription).
           </p>
+          <label class="toggle chat-profile-toggle"
+            title="Include your cross-game history so Claude coaches you on recurring patterns. Turn off to send fewer tokens.">
+            <input type="checkbox" id="profile-toggle" checked /> Personalize with my history
+          </label>
           <div id="chat-messages" class="chat-messages"></div>
           <form id="chat-form" class="chat-form">
             <input id="chat-input" type="text" autocomplete="off"
               placeholder="e.g. why is this bad? · what should I do here?" />
-            <button type="submit" id="chat-send">Send</button>
+            <button type="submit" id="chat-send" aria-label="Send" title="Send">→</button>
           </form>
         </div>
       </aside>

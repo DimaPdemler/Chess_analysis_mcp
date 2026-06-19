@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import webbrowser
 
 import uvicorn
 
@@ -16,6 +17,37 @@ from server.web.app import create_app
 
 _thread: threading.Thread | None = None
 _lock = threading.Lock()
+_opened = False
+_open_lock = threading.Lock()
+
+
+def open_board_once() -> None:
+    """Open the board in the default browser, at most once per process.
+
+    Called when a game is analysed (not at server boot) so the tab only appears once
+    there is actually a game to look at. Best-effort: a headless box or a missing
+    browser just logs to stderr and never raises. Disable with CHESS_WEB_OPEN=0.
+    """
+    global _opened
+    if not config.WEB_OPEN:
+        return
+    with _open_lock:
+        if _opened:
+            return
+        _opened = True
+    url = f"http://{config.WEB_HOST}:{config.WEB_PORT}"
+    try:
+        if webbrowser.open(url):
+            print(f"[chess-web] opened board in browser: {url}", file=sys.stderr, flush=True)
+        else:
+            print(
+                f"[chess-web] no browser to open; board is at {url}",
+                file=sys.stderr,
+                flush=True,
+            )
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[chess-web] could not open browser ({exc}); board is at {url}",
+              file=sys.stderr, flush=True)
 
 
 def _serve() -> None:

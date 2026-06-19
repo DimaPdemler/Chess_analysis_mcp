@@ -16,6 +16,7 @@ class ChatBody(BaseModel):
     last_move: str | None = None  # the move in question
     move_fen: str | None = None  # the position that move was played from
     session_id: str | None = None
+    use_profile: bool = False  # inject the player's cross-game coaching profile
 
 
 @router.post("/chat")
@@ -30,6 +31,7 @@ def chat(body: ChatBody) -> JSONResponse:
             last_move=body.last_move,
             move_fen=body.move_fen,
             session_id=body.session_id,
+            use_profile=body.use_profile,
         )
     except claude_bridge.ChatError as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)

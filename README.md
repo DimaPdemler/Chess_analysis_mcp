@@ -29,6 +29,10 @@ Lichess-style review UI) that share one engine and one analysis, so they never d
   **progressive deepening**, thicker arrow = better move), red = the refutation of a move you try.
 - **In-browser "why? / what now?" chat** powered by headless `claude -p` (your Claude
   subscription), fed pre-computed engine facts so answers are grounded, not estimated.
+- **Cross-game history + coaching profile.** Every reviewed game is saved locally, tagged with
+  recurring mistake motifs (hung pieces, missed forks, back-rank, time trouble…), and rolled up
+  into a per-player profile. Toggle **"Personalize with my history"** in the chat and Claude can
+  draw on your recurring patterns — only when they actually bear on the position in front of you.
 
 <!-- TODO: screenshot of the mistake list + the engine-grounded comment box.
      Show the right-sidebar "Mistakes" list and, below the board, the green comment box for a
@@ -49,8 +53,7 @@ the terminal and the board are always looking at the same analysis.
 </p>
 
 The browser's "why?" chat is the only part that reaches outside the process: the FastAPI backend
-shells out to headless `claude -p` (your subscription). See `chess_mcp_implementation_plan.md` for
-the full design and `CLAUDE.md` for contributor notes.
+shells out to headless `claude -p` (your subscription). 
 
 ---
 
@@ -158,7 +161,8 @@ up the `chess` server), then:
 2. Ask *"why was move 4 bad?"* → Claude calls `mcp__chess__get_engine_line` and explains using the
    returned best line + refutation.
 
-Tools exposed: `mcp__chess__analyze_game`, `mcp__chess__get_engine_line`, `mcp__chess__goto_mistake`.
+Tools exposed: `mcp__chess__analyze_game`, `mcp__chess__get_engine_line`, `mcp__chess__goto_mistake`,
+`mcp__chess__get_player_profile` (your cross-game coaching profile, see below).
 
 #### Example (terminal)
 
@@ -183,9 +187,44 @@ Follow-up questions remember the conversation.
      docs/screenshots/chat.png -->
 <!-- ![Ask why chat](docs/screenshots/chat.png) -->
 
-> **Note on billing:** in-browser chat uses your subscription's separate **Agent SDK credit** (not
+<!-- > **Note on billing:** in-browser chat uses your subscription's separate **Agent SDK credit** (not
 > per-token API billing). If it's exhausted, you'll get a friendly message, so just ask in the
-> Claude Code terminal instead, which uses your normal interactive limits.
+> Claude Code terminal instead, which uses your normal interactive limits. -->
+
+---
+
+## Game history & coaching profile
+
+Every game you review is **saved locally** so the tool can learn your recurring weaknesses over
+time. This is best-effort and fully local: history can never break a review, and nothing leaves
+your machine (the chat is the only outbound call, and your profile is only attached to it when you
+opt in).
+
+- **What's saved.** `analyze_game` appends one compact JSON record per reviewed game to
+  `<DATA_DIR>/history/games.jsonl` (`DATA_DIR` defaults to `<repo>/.chess-review`, which is
+  gitignored). Re-analyzing the same game — even at a deeper depth — supersedes the old record
+  rather than duplicating it.
+- **Mistake motifs.** Each flagged mistake is tagged with cheap, engine-free heuristics in three
+  buckets: things you *did* (e.g. `hung_piece`, `pawn_grab`), things you *missed* (`missed_fork`,
+  `missed_mate`, `missed_capture`), and things you *allowed* (`allowed_fork`, `allowed_mate`,
+  `back_rank`), plus `time_trouble` when your clock was low (read from `[%clk]` PGN comments).
+- **Coaching profile.** Records roll up into a **hybrid** profile: a `recent` sliding window (so
+  weaknesses you've fixed fade out) plus a `lifetime` view, with an "improving / slipping" trend.
+  Get it from the terminal with `mcp__chess__get_player_profile`, or let the board's chat use it.
+- **Personalized chat.** The chat panel's **"Personalize with my history"** toggle attaches the
+  profile to your question so Claude can connect the position to your recurring patterns. It's
+  designed to stay subtle — Claude only brings up your history when it genuinely sharpens the
+  answer, not in every reply.
+
+### Who is "you"? (identity & aliases)
+
+History is keyed to a canonical player, not a username, so games across your Lichess and Chess.com
+accounts merge into one profile. Set `CHESS_USERNAME` to your main handle and list any other handles
+in `CHESS_ALIASES` (comma-separated, e.g. `"dpdemler, my_other_lichess"`); they all fold into one
+player and also drive `player="auto"` side detection. For multiple people sharing the install, a
+hand-maintained `<DATA_DIR>/identities.json` alias map takes precedence.
+
+To turn history off entirely, set `CHESS_HISTORY=0`.
 
 ---
 
@@ -196,12 +235,18 @@ All via environment variables (sensible defaults shown):
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `STOCKFISH_PATH` | `stockfish` | Path to the Stockfish binary. |
-| `CHESS_USERNAME` | `thedarktintin` | Used by `player="auto"` to pick your side from PGN headers. |
+| `CHESS_USERNAME` | `JohnDoe` | Used by `player="auto"` to pick your side from PGN headers. |
 | `CHESS_DEFAULT_DEPTH` | `18` | Depth for on-demand single-position analysis. |
 | `CHESS_SWEEP_DEPTH` | `16` | Depth for the full-game sweep (keeps long games fast). |
 | `CHESS_ENGINE_POOL_SIZE` | `2` | Reused Stockfish processes. |
 | `CHESS_WEB_HOST` / `CHESS_WEB_PORT` | `127.0.0.1` / `8765` | Web board address. |
 | `CHESS_WEB_AUTOSTART` | `1` | Set `0` to stop the MCP server from launching the board. |
+| `CHESS_ALIASES` | *(empty)* | Your other handles (comma-separated) that fold into `CHESS_USERNAME` for history + auto side-detection. |
+| `CHESS_HISTORY` | `1` | Set `0` to disable saving game history & the coaching profile. |
+| `CHESS_DATA_DIR` | `<repo>/.chess-review` | Where history (`games.jsonl`, profile, `identities.json`) is stored. |
+| `CHESS_PROFILE_RECENT` | `25` | Games in the profile's `recent` sliding window. |
+| `CHESS_PROFILE_LIFETIME` | `all` | Lifetime view span; positive N = last N games, `0` = omit it (pure sliding window). |
+| `CHESS_SESSION_TTL` | `86400` | Seconds of inactivity before the server self-terminates (`0` disables the watchdog). |
 
 ---
 
@@ -221,7 +266,8 @@ the suite never spends Agent-SDK credit.
 ```
 server/
   config.py          # all tunables (env-driven)
-  core/              # engine pool, evaluation math, game analysis, session, engine_line
+  core/              # engine pool, evaluation math, game analysis, session, engine_line,
+                     #   history (game records + motifs + coaching profile), lifecycle watchdog
   mcp_server.py      # MCP tools; boots the web server in a background thread
   claude_bridge.py   # headless `claude -p` for the chat (subscription)
   web/               # FastAPI app + board/chat routes + uvicorn runner

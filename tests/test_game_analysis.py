@@ -41,6 +41,15 @@ def test_resolve_player():
     assert resolve_player({"White": "z", "Black": "y"}, "auto") == "white"
 
 
+def test_resolve_player_matches_aliases(monkeypatch):
+    from server import config
+
+    # CHESS_ALIASES handles are recognised by player="auto" too (bare = any platform).
+    monkeypatch.setattr(config, "USERNAME_ALIASES", [(None, "my_chesscom"), ("lichess", "myalt")])
+    assert resolve_player({"White": "z", "Black": "my_chesscom"}, "auto") == "black"
+    assert resolve_player({"White": "MyAlt", "Black": "z"}, "auto") == "white"  # case-insensitive
+
+
 def test_platform_detection_and_elo_normalization():
     assert _detect_platform({"Site": "https://lichess.org/abcd"}) == "lichess"
     assert _detect_platform({"Site": "Chess.com", "Link": "https://chess.com/game/1"}) == "chesscom"
@@ -66,6 +75,31 @@ def test_review_elo_tightens_thresholds():
     assert strong.review_elo == 2400.0 and strong.elo_source == "explicit"
     assert strong.thresholds[0] < default.thresholds[0]  # inaccuracy cutoff is tighter
     assert default.review_elo is None and default.thresholds == [5.0, 10.0, 15.0]
+
+
+# Same blunder, but with lichess-style [%clk] comments: White is in time trouble (8s) on Qxe5.
+CLOCK_PGN = """[Event "test"]
+[White "me"]
+[Black "opp"]
+[Result "*"]
+[TimeControl "600+0"]
+
+1. e4 { [%clk 0:00:30] } 1... e5 { [%clk 0:09:55] } 2. Qh5 { [%clk 0:00:20] } 2... Nc6 { [%clk 0:09:50] } 3. Qxe5 { [%clk 0:00:08] } 3... Nxe5 { [%clk 0:09:45] } *
+"""
+
+
+def test_clock_parsing_and_time_trouble():
+    """[%clk] comments are parsed onto MoveReview and drive the time_trouble motif."""
+    from server.core import history
+
+    sess = analyze_game(CLOCK_PGN, player="white", depth=8)
+    blunder = next(m for m in sess.mistakes if m.move_san.startswith("Qxe5"))  # "Qxe5+" (check)
+    assert blunder.clock_after == 8.0  # 0:00:08 remaining after the blunder
+    assert blunder.opp_clock == 590.0  # opponent's clock at their previous move
+
+    rec = history.build_game_record(sess)
+    mm = next(x for x in rec["mistakes"] if x["san"].startswith("Qxe5"))
+    assert "time_trouble" in mm["motifs"]
 
 
 def test_annotated_pgn_walks_cleanly():

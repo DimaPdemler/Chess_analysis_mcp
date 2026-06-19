@@ -24,6 +24,7 @@ ENV/
 .coverage.*
 htmlcov/
 .tox/
+example_pgns/
 
 # Node / frontend (Phases 4-5)
 node_modules/
@@ -44,3 +45,6 @@ stockfish/
 *.log
 /tmp/
 chess_mcp_implementation_plan.md
+
+# Local game history + coaching profiles (CHESS_DATA_DIR; never commit personal game data)
+.chess-review/
