@@ -51,3 +51,6 @@ chess_mcp_implementation_plan.md
 
 # Local game history + coaching profiles (CHESS_DATA_DIR; never commit personal game data)
 .chess-review/
+
+# Built macOS app bundle (scripts/build_app.sh; only the script is committed)
+*.app/

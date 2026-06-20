@@ -9,7 +9,8 @@
       "CHESS_ALIASES": "OPTIONAL. Comma-separated list of any other handles you've played under, so old/alt accounts fold into one coaching profile.",
       "LICHESS_TOKEN": "OPTIONAL. Lets the fetch_games/fetch_game tools import your Lichess games so you don't paste PGNs. Leave empty for anonymous access (fine for most). If you import a lot and start hitting rate limits (HTTP 429), paste a free Personal Access Token from https://lichess.org/account/oauth/token (no scopes needed) here — requests are then throttled per-token instead of per-IP.",
       "CHESS_PROFILE_RECENT": "OPTIONAL. How many recent games feed the 'recent form' coaching profile.",
-      "CHESS_PROFILE_LIFETIME": "OPTIONAL. How many games feed the broader 'lifetime' profile ('all' for everything)."
+      "CHESS_PROFILE_LIFETIME": "OPTIONAL. How many games feed the broader 'lifetime' profile ('all' for everything).",
+      "CHESS_DATA_DIR": "OPTIONAL. Where analyzed-game history + the analysis cache + settings live. You normally DON'T set this: by default it resolves to a per-user app-data folder (macOS: ~/Library/Application Support/Tintin AI Chess Analysis/data) that the double-click .app uses too, so games analyzed in Claude Code and in the app share one history/cache (no re-analysis, one coaching profile) automatically. Set an absolute path here only to force a custom location (e.g. <repo>/.chess-review to keep data inside this checkout); .mcp.json does NOT expand ~ or $HOME."
     },
     "_notice": "-------------------- SET CHESS_USERNAME BELOW; everything else is optional --------------------"
   },

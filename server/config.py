@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 
 # Repo root (this file is <repo>/server/config.py), used for repo-relative defaults.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -112,9 +113,29 @@ USERNAME_ALIASES: list[tuple[str | None, str]] = _parse_aliases(os.environ.get("
 # <DATA_DIR>/history/games.jsonl, deduped by (game_id, reviewed_side). Identity aliases
 # (one person, several lichess/chess.com accounts) live in <DATA_DIR>/identities.json, and
 # a rebuildable per-player profile is cached in <DATA_DIR>/profiles/<player_id>.json.
-# Defaults to <repo>/.chess-review (gitignored, so it stays local but out of version control).
 # CHESS_DATA_DIR overrides the location; CHESS_HISTORY=0 disables recording entirely.
-DATA_DIR: str = os.environ.get("CHESS_DATA_DIR", os.path.join(_REPO_ROOT, ".chess-review"))
+
+
+def _default_data_dir() -> str:
+    """User-level folder for history/cache/settings — the SHARED store.
+
+    Resolved per-OS to the conventional app-data location so every entry point on a machine lands
+    in the same place automatically: the MCP server (Claude Code) and the double-click `.app` thus
+    read/write ONE history + analysis cache + coaching profile, with no machine-specific config.
+    (The `.app` launcher also exports the macOS path explicitly, belt-and-suspenders.) Overridable
+    with CHESS_DATA_DIR; set it to ``<repo>/.chess-review`` to keep data inside a dev checkout.
+    """
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Application Support", "Tintin AI Chess Analysis", "data")
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+        return os.path.join(base, "Tintin AI Chess Analysis", "data")
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return os.path.join(base, "tintin-ai-chess-analysis", "data")
+
+
+DATA_DIR: str = os.environ.get("CHESS_DATA_DIR", "").strip() or _default_data_dir()
 HISTORY_ENABLED: bool = os.environ.get("CHESS_HISTORY", "1") != "0"
 
 # Disk cache of fully-analysed games (<DATA_DIR>/analysis-cache/<game_id>_<side>.json), keyed by

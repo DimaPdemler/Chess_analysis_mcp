@@ -104,6 +104,30 @@ already loaded. Every launch after that skips straight to opening the board.
 - **To quit:** just close the browser tab — the server stops a few seconds later and its terminal
   window closes itself. (You can also close that window directly, or press Ctrl-C in it.)
 
+#### Prefer a real macOS app in /Applications? Build the `.app` bundle
+
+For an Anki-style experience — an icon you drag into **Applications** and double-click, with **no
+terminal window at all** — build a native `.app` wrapper:
+
+```bash
+./scripts/build_app.sh        # → Tintin's AI Chess Analysis.app (in the repo root)
+```
+
+Then drag `Tintin's AI Chess Analysis.app` into **/Applications** and double-click it. Behaviour
+is identical to the `.command` launcher (first run installs uv + Stockfish; later runs open straight to
+the board; close the tab to quit), with two niceties: it runs as a GUI app (no Terminal window), and
+its Python environment + your games/settings live in
+`~/Library/Application Support/Tintin AI Chess Analysis/` — **outside** the bundle, so the app stays
+immutable and your data survives a rebuild or update.
+
+- **First open:** unsigned, so macOS Gatekeeper needs **right-click → Open → Open** once.
+- **Icon:** ships with the site's chess-pawn favicon (`assets/app_icon.png`). To customise, replace
+  that file (1024×1024) or drop an `assets/AppIcon.icns`, then rebuild.
+- **Setup problems** are shown in a dialog; full logs go to
+  `~/Library/Application Support/Tintin AI Chess Analysis/launch.log`.
+- It still needs the network on first run (to fetch uv + Python + Stockfish) and the `claude` CLI for
+  the in-browser chat — for a fully offline, dependency-free bundle you'd need a PyInstaller build.
+
 ### Prerequisites (what the installer handles for you)
 
 - **Stockfish** engine (the installer adds it via `brew` / `apt` / `winget`). The tool auto-detects
@@ -250,9 +274,10 @@ your machine (the chat is the only outbound call, and your profile is only attac
 opt in).
 
 - **What's saved.** `analyze_game` appends one compact JSON record per reviewed game to
-  `<DATA_DIR>/history/games.jsonl` (`DATA_DIR` defaults to `<repo>/.chess-review`, which is
-  gitignored). Re-analyzing the same game — even at a deeper depth — supersedes the old record
-  rather than duplicating it.
+  `<DATA_DIR>/history/games.jsonl`. `DATA_DIR` defaults to a per-user app-data folder (macOS:
+  `~/Library/Application Support/Tintin AI Chess Analysis/data`) that both Claude Code **and** the
+  double-click app use, so they share one history/cache automatically. Re-analyzing the same game —
+  even at a deeper depth — supersedes the old record rather than duplicating it.
 - **Mistake motifs.** Each flagged mistake is tagged with cheap, engine-free heuristics in three
   buckets: things you *did* (e.g. `hung_piece`, `pawn_grab`), things you *missed* (`missed_fork`,
   `missed_mate`, `missed_capture`), and things you *allowed* (`allowed_fork`, `allowed_mate`,
@@ -315,7 +340,7 @@ All settable via environment variables too (sensible defaults shown); `settings.
 | `CHESS_WEB_AUTOSTART` | `1` | Set `0` to stop the MCP server from launching the board. |
 | `CHESS_ALIASES` | *(empty)* | Your other handles (comma-separated) that fold into `CHESS_USERNAME` for history + auto side-detection. |
 | `CHESS_HISTORY` | `1` | Set `0` to disable saving game history & the coaching profile. |
-| `CHESS_DATA_DIR` | `<repo>/.chess-review` | Where history (`games.jsonl`, profile, `identities.json`) is stored. |
+| `CHESS_DATA_DIR` | *(per-user app-data dir)* | Where history (`games.jsonl`, profile, `identities.json`) is stored. Defaults to a user-level folder shared by Claude Code and the app (macOS: `~/Library/Application Support/Tintin AI Chess Analysis/data`); set `<repo>/.chess-review` to keep it in the checkout. |
 | `CHESS_PROFILE_RECENT` | `100` | Games in the profile's `recent` sliding window. |
 | `CHESS_PROFILE_LIFETIME` | `all` | Lifetime view span; positive N = last N games, `0` = omit it (pure sliding window). |
 | `CHESS_SESSION_TTL` | `86400` | Seconds of inactivity before the server self-terminates (`0` disables the watchdog). |
