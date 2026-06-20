@@ -9,6 +9,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from server import config
 from server.core.evaluation import Classification
 
 
@@ -47,12 +48,18 @@ class ReviewSession(BaseModel):
     player: str  # "white" | "black" — whose mistakes we reviewed
     headers: dict[str, str] = Field(default_factory=dict)
     result: str = "*"
+    # Game speed bucket (bullet/blitz/rapid/classical/correspondence/unknown), from the
+    # TimeControl header. Lets coaching apply mode-appropriate expectations.
+    speed: str = "unknown"
     accuracy_white: float = 100.0
     accuracy_black: float = 100.0
     all_moves: list[MoveReview] = Field(default_factory=list)  # every move by `player`
     mistakes: list[MoveReview] = Field(default_factory=list)  # inaccuracy/mistake/blunder
     current_index: int = 0  # index into `mistakes`
     explore_fen: Optional[str] = None
+    # Cache for the opt-in Claude-written coaching summary (generated once on demand via
+    # /api/coach, then reused). Cleared naturally when a new game replaces the session.
+    coach_ai_text: Optional[str] = None
     # Skill-adaptive review: the Elo we tuned the mistake thresholds to (normalized scale),
     # where it came from, the resulting (inaccuracy, mistake, blunder) win%-drop cutoffs, and
     # the sweep depth used. review_elo None -> default 5/10/15 thresholds.
@@ -109,17 +116,29 @@ def summarize_session(sess: ReviewSession) -> dict:
         }
         for i, m in enumerate(sess.mistakes)
     ]
+    # Engine-free coaching blurb (history.coach_summary) — always computed (it's free). Lazy import
+    # avoids a circular dependency (history imports session); never allowed to break the summary.
+    coach = None
+    try:
+        from server.core import history
+
+        coach = history.coach_summary(sess)
+    except Exception:
+        coach = None
     return {
         "result": sess.result,
         "player": sess.player,
         "white": sess.headers.get("White", "?"),
         "black": sess.headers.get("Black", "?"),
         "opening": sess.headers.get("Opening", sess.headers.get("ECO", "")),
+        "speed": sess.speed,
+        "time_control": sess.headers.get("TimeControl") or None,
         "accuracy_white": sess.accuracy_white,
         "accuracy_black": sess.accuracy_black,
         "num_my_moves": len(sess.all_moves),
         "num_mistakes": len(sess.mistakes),
         "mistakes": mistakes,
+        "coach_summary": coach,
         "current_index": sess.current_index,
         "review_elo": sess.review_elo,
         "elo_source": sess.elo_source,
@@ -146,9 +165,8 @@ def goto_core(index: int) -> dict:
     sess.explore_fen = None
     m = sess.mistakes[index]
     prompt = (
-        f"Move {m.move_number} ({m.color}): you played {m.move_san} "
-        f"({m.classification}, lost {m.win_swing}% win chance). "
-        f"It's {m.color} to move — find something better."
+        f"Move {m.move_number} ({m.color}): {m.move_san} — "
+        f"{m.classification} (−{m.win_swing}% win chance)"
     )
     return {
         "index": index,

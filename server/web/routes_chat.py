@@ -1,4 +1,8 @@
-"""In-browser chat route (Phase 6): POST /api/chat -> headless Claude Code."""
+"""In-browser chat route (Phase 6): POST /api/chat -> headless Claude Code.
+
+Also hosts POST /api/coach: the opt-in, Claude-written end-of-game summary (the free templated
+blurb rides on /api/session instead).
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -6,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from server import claude_bridge
+from server.core import session as session_mod
 
 router = APIRouter()
 
@@ -36,3 +41,23 @@ def chat(body: ChatBody) -> JSONResponse:
     except claude_bridge.ChatError as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)
     return JSONResponse(res)
+
+
+@router.post("/coach")
+def coach() -> JSONResponse:
+    """Generate (once, then cache) the on-demand Claude-written summary for the current game.
+
+    Ungated: this is only ever called by an explicit user action (the AI-summary button, or the
+    auto-press when the user has turned that on in Settings), so it spends Claude only when asked.
+    """
+    sess = session_mod.get_session()
+    if sess is None:
+        return JSONResponse({"error": "No game analysed yet."}, status_code=400)
+    if sess.coach_ai_text:  # already written for this game — reuse, no second Claude call
+        return JSONResponse({"summary": sess.coach_ai_text, "cached": True})
+    try:
+        text = claude_bridge.coach_summary_ai(sess)
+    except claude_bridge.ChatError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    sess.coach_ai_text = text
+    return JSONResponse({"summary": text})

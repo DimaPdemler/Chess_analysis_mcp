@@ -6,13 +6,57 @@ Values can be overridden via environment variables.
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 
 # Repo root (this file is <repo>/server/config.py), used for repo-relative defaults.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Path to the Stockfish binary. Defaults to "stockfish" on PATH; the .mcp.json
-# registration sets this explicitly to /usr/local/bin/stockfish.
-STOCKFISH_PATH: str = os.environ.get("STOCKFISH_PATH", "stockfish")
+# Common locations a Stockfish binary lands in across the package managers we point
+# users at. Searched (in order) only when STOCKFISH_PATH isn't set and `stockfish`
+# isn't on PATH, so a normal `brew`/`apt` install needs zero configuration.
+_COMMON_STOCKFISH_PATHS = [
+    "/opt/homebrew/bin/stockfish",  # macOS, Apple Silicon Homebrew
+    "/usr/local/bin/stockfish",     # macOS Intel Homebrew / manual installs
+    "/usr/bin/stockfish",           # Debian/Ubuntu apt
+    "/usr/games/stockfish",         # some Linux distros put it here
+]
+
+
+def _resolve_stockfish() -> str:
+    """Best-effort path to the Stockfish binary.
+
+    Priority: an explicit STOCKFISH_PATH (honoured as set, resolved via PATH if it's a
+    bare command) -> `stockfish` on PATH -> the common install locations above. Falls
+    back to the bare name "stockfish" so the engine still raises a clear, actionable
+    error (see stockfish_install_hint) when nothing is found.
+    """
+    explicit = os.environ.get("STOCKFISH_PATH", "").strip()
+    if explicit:
+        return shutil.which(explicit) or explicit
+    found = shutil.which("stockfish")
+    if found:
+        return found
+    for path in _COMMON_STOCKFISH_PATHS:
+        if os.path.isfile(path):
+            return path
+    return "stockfish"
+
+
+def stockfish_install_hint(path: str | None = None) -> str:
+    """One-line, copy-pasteable guidance shown when Stockfish can't be launched."""
+    tried = path or STOCKFISH_PATH
+    return (
+        f"Stockfish engine not found (tried '{tried}'). Install it — macOS: "
+        "`brew install stockfish`; Debian/Ubuntu: `sudo apt install stockfish` — or "
+        "download it from https://stockfishchess.org/download/ and set STOCKFISH_PATH "
+        "to the binary. See the README 'Installation' section."
+    )
+
+
+# Path to the Stockfish binary. Auto-detected (PATH + common locations) so a standard
+# install needs no config; override with the STOCKFISH_PATH env var.
+STOCKFISH_PATH: str = _resolve_stockfish()
 
 # Depth used for on-demand single-position analysis (get_engine_line, REPL checks).
 # Fixed depth keeps evals reproducible and cacheable.
@@ -69,10 +113,45 @@ USERNAME_ALIASES: list[tuple[str | None, str]] = _parse_aliases(os.environ.get("
 # <DATA_DIR>/history/games.jsonl, deduped by (game_id, reviewed_side). Identity aliases
 # (one person, several lichess/chess.com accounts) live in <DATA_DIR>/identities.json, and
 # a rebuildable per-player profile is cached in <DATA_DIR>/profiles/<player_id>.json.
-# Defaults to <repo>/.chess-review (gitignored, so it stays local but out of version control).
 # CHESS_DATA_DIR overrides the location; CHESS_HISTORY=0 disables recording entirely.
-DATA_DIR: str = os.environ.get("CHESS_DATA_DIR", os.path.join(_REPO_ROOT, ".chess-review"))
+
+
+def _default_data_dir() -> str:
+    """User-level folder for history/cache/settings — the SHARED store.
+
+    Resolved per-OS to the conventional app-data location so every entry point on a machine lands
+    in the same place automatically: the MCP server (Claude Code) and the double-click `.app` thus
+    read/write ONE history + analysis cache + coaching profile, with no machine-specific config.
+    (The `.app` launcher also exports the macOS path explicitly, belt-and-suspenders.) Overridable
+    with CHESS_DATA_DIR; set it to ``<repo>/.chess-review`` to keep data inside a dev checkout.
+    """
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Application Support", "Tintin AI Chess Analysis", "data")
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+        return os.path.join(base, "Tintin AI Chess Analysis", "data")
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return os.path.join(base, "tintin-ai-chess-analysis", "data")
+
+
+DATA_DIR: str = os.environ.get("CHESS_DATA_DIR", "").strip() or _default_data_dir()
 HISTORY_ENABLED: bool = os.environ.get("CHESS_HISTORY", "1") != "0"
+
+# Disk cache of fully-analysed games (<DATA_DIR>/analysis-cache/<game_id>_<side>.json), keyed by
+# the same (game_id, reviewed_side) history dedupes on. Reopening a game already analysed on this
+# machine — even in a previous app session — then loads from disk instead of re-running the
+# ~20-45s Stockfish sweep. Best-effort; CHESS_ANALYSIS_CACHE=0 disables it. The entry cap bounds
+# disk growth (least-recently-used pruned); CHESS_ANALYSIS_CACHE_MAX=0 means unbounded.
+ANALYSIS_CACHE_ENABLED: bool = os.environ.get("CHESS_ANALYSIS_CACHE", "1") != "0"
+ANALYSIS_CACHE_MAX: int = int(os.environ.get("CHESS_ANALYSIS_CACHE_MAX", "1000"))
+
+# The engine-grounded templated coaching blurb (history.coach_summary) is always attached to a
+# session summary — it's free (no engine/Claude work). The richer, Claude-WRITTEN summary is
+# generated on demand via /api/coach (a button in the UI), so it only spends the user's Claude
+# subscription when asked. This flag controls whether the UI presses that button AUTOMATICALLY for
+# each game opened; off by default (CHESS_COACH_AI_AUTO=1 to default it on).
+COACH_AI_AUTO: bool = os.environ.get("CHESS_COACH_AI_AUTO", "0") == "1"
 
 # Self-terminate the server process after this many seconds of inactivity (no MCP tool call
 # and no board request), so an abandoned session doesn't linger as a process forever. Activity
@@ -93,7 +172,7 @@ def _parse_int(name: str, default: int) -> int:
 #                     the last N games; "0" -> DISABLED, leaving only the recent window (i.e. a pure
 #                     sliding window). Both are recomputed from the full games.jsonl, so widening a
 #                     window later loses nothing.
-PROFILE_RECENT_WINDOW: int = _parse_int("CHESS_PROFILE_RECENT", 25)
+PROFILE_RECENT_WINDOW: int = _parse_int("CHESS_PROFILE_RECENT", 100)
 
 
 def _parse_lifetime(raw: str | None) -> int | None:
@@ -108,6 +187,18 @@ def _parse_lifetime(raw: str | None) -> int | None:
 
 PROFILE_LIFETIME: int | None = _parse_lifetime(os.environ.get("CHESS_PROFILE_LIFETIME"))
 
+# Lichess game import (so users don't paste PGNs). The fetch_games/fetch_game tools call the
+# public Lichess API. Auth is OPTIONAL: set LICHESS_TOKEN to a Personal Access Token
+# (https://lichess.org/account/oauth/token, no scopes needed for public game export) and requests
+# are throttled per-token instead of per-IP — the escape hatch for heavy users who hit rate limits.
+# Anonymous (no token) works fine for public games. LICHESS_API_BASE is overridable for testing.
+LICHESS_TOKEN: str = os.environ.get("LICHESS_TOKEN", "").strip()
+LICHESS_API_BASE: str = os.environ.get("LICHESS_API_BASE", "https://lichess.org").rstrip("/")
+# How many recent games fetch_games returns when a count isn't given.
+LICHESS_DEFAULT_MAX: int = int(os.environ.get("CHESS_LICHESS_MAX", "3"))
+# HTTP timeout (seconds) for Lichess requests.
+LICHESS_TIMEOUT: float = float(os.environ.get("CHESS_LICHESS_TIMEOUT", "20"))
+
 # Web board (Phase 4). The FastAPI server runs in the same process as the MCP server,
 # sharing the one engine pool and ReviewSession. WEB_AUTOSTART=0 disables the autostart
 # (e.g. when driving the web server standalone via scripts/run_web.py).
@@ -117,3 +208,8 @@ WEB_AUTOSTART: bool = os.environ.get("CHESS_WEB_AUTOSTART", "1") != "0"
 # Auto-open the board in the default browser the first time a game is analysed, so a
 # first-time user never has to be told the URL. Set CHESS_WEB_OPEN=0 to disable.
 WEB_OPEN: bool = os.environ.get("CHESS_WEB_OPEN", "1") != "0"
+# "App mode": set by the double-click launcher (Tintins AI Chess Analysis.command / .bat) when serving the
+# board standalone for users who never touch a terminal. The frontend reads it via
+# /api/app-config and, when on, auto-loads the user's most recent Lichess game on open. Left off
+# (0) for the MCP-driven board and dev `run_web.py <pgn>` runs, so neither gets a surprise autoload.
+APP_MODE: bool = os.environ.get("CHESS_APP_MODE", "0") == "1"

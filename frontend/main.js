@@ -33,6 +33,32 @@ let chatFen = null;
 let chatMove = null;
 let chatSession = null; // claude -p session id, threaded across questions
 
+// History panel + progressive (navigate-while-analyzing) open.
+let analyzing = false; // true during phase 1: provisional PGN timeline, no engine evals yet
+let historyMode = "normal"; // "normal" (local games) | "lichess"
+let myPlayerId = ""; // configured user's id, for inferring side on lichess lookups
+let pollTimer = null; // analysis-status poller
+let batchInfo = null; // {total, self_handle, lastDone} while a multi-game upload is analyzing
+let lichessCount = 5; // how many recent lichess games to show ("Load more" grows it)
+let lichessUser = ""; // the handle currently shown in lichess mode (for "Load more")
+const LICHESS_PAGE = 5; // initial count + how many more each "Load more"
+// "My games": /api/history returns every analysed game; we render them in pages (inside the
+// fixed-height scroll box) so the list starts short and grows on "Show more", not the page.
+let historyGames = []; // all rows from the last /api/history fetch
+let historyCount = 10; // how many to show now ("Show more" grows it)
+const HISTORY_PAGE = 10; // initial count + how many more each "Show more"
+
+// App mode (double-click launcher): on open, auto-load the user's most recent game.
+// `appUsername` is the single, server-side identity (config.USERNAME, editable in Settings) — used
+// for autoload, "My games", and the coaching profile, so there's one source of truth.
+let appMode = false;
+let appUsername = "";
+// On-demand Claude-written end-of-game summary: generated when the user presses the button, or
+// automatically per game when `coachAiAuto` is on (a Settings option). `coachAiToken` invalidates
+// an in-flight request when a new game is opened so a stale summary never lands on the wrong game.
+let coachAiAuto = false;
+let coachAiToken = 0;
+
 const $ = (id) => document.getElementById(id);
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
@@ -82,7 +108,7 @@ function drawArrows() {
   const shapes = [];
   // The move you actually played in-game — only at the review position. Grey = neutral
   // "here's what you did", not a colour-coded judgement.
-  if (!exploring && cur === anchorNode && timeline[cur] && timeline[cur].move_uci) {
+  if (!exploring && !analyzing && cur === anchorNode && timeline[cur] && timeline[cur].move_uci) {
     shapes.push(arrowShape(timeline[cur].move_uci, "grey"));
   }
   if (bestArrowOn) for (const a of bestArrows) shapes.push(a);
@@ -165,7 +191,8 @@ function applyEvalBarTheme() {
   }
 }
 function setEvalBar(winWhite) {
-  const bottomShare = orient === "white" ? winWhite : 100 - winWhite;
+  const w = winWhite == null ? 50 : winWhite; // phase-1 (no eval yet) -> neutral
+  const bottomShare = orient === "white" ? w : 100 - w;
   $("evalbar-fill").style.height = `${clamp(bottomShare, 0, 100)}%`;
 }
 
@@ -205,7 +232,8 @@ function updateStatus() {
     $("ret").onclick = returnToReview;
   } else {
     el.className = "status";
-    el.textContent = currentPrompt || nodeLabel(cur);
+    const g = timeline[cur] ? classGlyph(timeline[cur].classification) : "";
+    el.innerHTML = g + escapeHtml(currentPrompt || nodeLabel(cur));
   }
 }
 
@@ -224,6 +252,7 @@ function gotoNode(n) {
   updateStatus();
   updateNav();
   renderGraph();
+  highlightCurrentMove();
   refreshBestMoves();
 }
 
@@ -350,7 +379,12 @@ function renderGraph() {
   const y = (w) => GH - (w / 100) * GH;
   // Plot from the reviewed player's perspective, matching the eval bar: the filled area
   // grows from the bottom as YOUR side does better, so for black it reads black-on-bottom.
-  const val = (nd) => (orient === "white" ? nd.win_white : 100 - nd.win_white);
+  // During phase-1 (analysing) nodes have no win_white yet -> treat as 50 (flat baseline).
+  const hasEval = timeline.some((nd) => nd.win_white != null);
+  const val = (nd) => {
+    const w = nd.win_white == null ? 50 : nd.win_white;
+    return orient === "white" ? w : 100 - w;
+  };
 
   // Two-tone fill split at the eval curve, mirroring the eval bar: each side keeps its own
   // colour (light = White, dark = Black) and the reviewed player's side sits on the bottom.
@@ -381,20 +415,36 @@ function renderGraph() {
     `<line x1="${cx}" y1="0" x2="${cx}" y2="${GH}" stroke="#629924" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
     `<circle cx="${cx}" cy="${cy}" r="4" fill="#629924" vector-effect="non-scaling-stroke"/>`;
 
+  const analyzingNote = hasEval
+    ? ""
+    : `<text x="${GW / 2}" y="${GH / 2 - 4}" fill="#9c9890" font-size="9" text-anchor="middle" ` +
+      `vector-effect="non-scaling-stroke">analyzing… moves are navigable now</text>`;
+
   svg.innerHTML =
     `<rect x="0" y="0" width="${GW}" height="${GH}" fill="#14130f"/>` +
     `<path d="${aboveArea}" fill="${topFill}"/>` +
     `<path d="${belowArea}" fill="${bottomFill}"/>` +
     `<line x1="0" y1="${GH / 2}" x2="${GW}" y2="${GH / 2}" stroke="#4a4843" stroke-width="1" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>` +
-    `<path d="${line}" fill="none" stroke="#e8e6e3" stroke-width="1.5" vector-effect="non-scaling-stroke"/>` +
+    (hasEval
+      ? `<path d="${line}" fill="none" stroke="#e8e6e3" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`
+      : "") +
     mistakeDots +
-    marker;
+    marker +
+    analyzingNote;
 }
 
 function classColor(cls) {
   return (
     { inaccuracy: "#e0a800", mistake: "#e08000", blunder: "#dd3333" }[cls] || "#629924"
   );
+}
+
+// A small graded badge for a move's classification (only the reviewed player's moves carry one).
+// `good` and opponent moves (null) get no glyph so the notation stays readable.
+const GLYPHS = { blunder: "??", mistake: "?", inaccuracy: "?!", best: "✓" };
+function classGlyph(cls) {
+  const g = GLYPHS[cls];
+  return g ? `<span class="glyph ${cls}">${g}</span>` : "";
 }
 
 function onGraphClick(ev) {
@@ -409,6 +459,13 @@ function onGraphClick(ev) {
 function renderMistakeList() {
   const ol = $("mistakes");
   ol.innerHTML = "";
+  if (analyzing && !mistakes.length) {
+    const li = document.createElement("li");
+    li.className = "ph";
+    li.textContent = "Analyzing… mistakes will appear here when the engine finishes.";
+    ol.appendChild(li);
+    return;
+  }
   mistakes.forEach((m, i) => {
     const li = document.createElement("li");
     li.dataset.index = i;
@@ -432,6 +489,113 @@ async function selectMistake(i) {
   );
   gotoNode(anchorNode);
   $("comment").textContent = mistakes[i].comment || "";
+}
+
+// --- scoreboard (game report header) -------------------------------------
+// Headline stats for the reviewed side, derived entirely from the /session payload: opening,
+// per-side accuracy, and counts of blunders / mistakes / inaccuracies (the `mistakes` array is
+// exactly the reviewed player's flagged moves). Clicking a count chip jumps to the first of that
+// class. Rendered from applySession (phase-2), so it only ever shows real numbers.
+function renderScoreboard(session) {
+  const board = $("scoreboard");
+  if (!board) return;
+  const reviewed = session.player === "black" ? "black" : "white";
+  const sideLabel = reviewed === "white" ? "White" : "Black";
+  const myAcc = reviewed === "white" ? session.accuracy_white : session.accuracy_black;
+  const oppAcc = reviewed === "white" ? session.accuracy_black : session.accuracy_white;
+  const counts = { blunder: 0, mistake: 0, inaccuracy: 0 };
+  (session.mistakes || []).forEach((m) => {
+    if (counts[m.classification] != null) counts[m.classification] += 1;
+  });
+  board.innerHTML =
+    `<div class="sb-opening" title="Opening">${escapeHtml(session.opening || "—")}</div>` +
+    `<div class="sb-acc">` +
+    `<span class="sb-acc-main"><b>${myAcc}</b><span class="sb-acc-lbl">accuracy (${sideLabel})</span></span>` +
+    `<span class="sb-acc-opp">opponent ${oppAcc}</span>` +
+    `</div>` +
+    `<div class="sb-counts">` +
+    scoreboardChip("blunder", counts.blunder, "Blunders") +
+    scoreboardChip("mistake", counts.mistake, "Mistakes") +
+    scoreboardChip("inaccuracy", counts.inaccuracy, "Inaccuracies") +
+    `</div>`;
+  board.hidden = false;
+  board.querySelectorAll(".chip[data-cls]").forEach((el) =>
+    el.addEventListener("click", () => jumpToClass(el.dataset.cls))
+  );
+}
+
+function scoreboardChip(cls, n, label) {
+  return (
+    `<button type="button" class="chip ${cls}" data-cls="${cls}" title="${label}">` +
+    `<span class="chip-n">${n}</span> <span class="chip-lbl">${label}</span></button>`
+  );
+}
+
+function jumpToClass(cls) {
+  const i = mistakes.findIndex((m) => m.classification === cls);
+  if (i >= 0) selectMistake(i);
+}
+
+// --- move list (clickable notation) --------------------------------------
+// The full game as a compact, scrollable two-column notation panel. Built from the same `timeline`
+// the graph/arrows use, so it works on the provisional (phase-1) timeline too — glyphs just fill in
+// when engine analysis lands. Clicking a flagged move routes through selectMistake (surfacing its
+// comment + anchor); any other move is a plain gotoNode jump.
+function renderMoveList() {
+  const ol = $("movelist");
+  if (!ol) return;
+  ol.innerHTML = "";
+  const plies = timeline.filter((nd) => nd.move_san); // skip the final (terminal) node
+  if (!plies.length) return;
+  const rows = new Map(); // move_number -> {w, b}
+  for (const nd of plies) {
+    if (!rows.has(nd.move_number)) rows.set(nd.move_number, { w: null, b: null });
+    rows.get(nd.move_number)[nd.color === "white" ? "w" : "b"] = nd;
+  }
+  for (const [num, pair] of rows) {
+    const li = document.createElement("li");
+    li.className = "move-row";
+    li.innerHTML = `<span class="moveno">${num}.</span>${plyCell(pair.w)}${plyCell(pair.b)}`;
+    ol.appendChild(li);
+  }
+  ol.querySelectorAll(".ply[data-node]").forEach((el) =>
+    el.addEventListener("click", () => onMoveClick(Number(el.dataset.node)))
+  );
+  highlightCurrentMove();
+}
+
+function plyCell(nd) {
+  if (!nd) return `<span class="ply empty"></span>`;
+  return `<span class="ply" data-node="${nd.node}">${classGlyph(nd.classification)}${nd.move_san}</span>`;
+}
+
+function onMoveClick(i) {
+  const nd = timeline[i];
+  if (nd && nd.mistake_index != null) selectMistake(nd.mistake_index);
+  else gotoNode(i);
+}
+
+// Highlight the move at the current node and keep it scrolled into view (works in compact mode).
+function highlightCurrentMove() {
+  const ol = $("movelist");
+  if (!ol) return;
+  let active = null;
+  ol.querySelectorAll(".ply[data-node]").forEach((el) => {
+    const on = Number(el.dataset.node) === cur;
+    el.classList.toggle("active", on);
+    if (on) active = el;
+  });
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
+// Compact (a few rows, scrollable) <-> expanded (whole game). Default is compact.
+function toggleMoveList() {
+  const ol = $("movelist");
+  if (!ol) return;
+  const expanded = ol.classList.toggle("expanded");
+  ol.classList.toggle("compact", !expanded);
+  $("movelist-expand").textContent = expanded ? "Collapse ▴" : "Show all ▾";
+  highlightCurrentMove();
 }
 
 function updateNav() {
@@ -531,13 +695,7 @@ async function sendChat(ev) {
 }
 
 // --- init ----------------------------------------------------------------
-async function loadAll() {
-  const session = await fetch("/api/session").then((r) => r.json());
-  if (session.empty) {
-    $("game-meta").textContent =
-      "No game analysed yet. Run analyze_game (or scripts/run_web.py) first.";
-    return;
-  }
+function applySession(session) {
   const sens = session.review_elo
     ? ` · sensitivity ~${Math.round(session.review_elo)} Elo`
     : "";
@@ -546,15 +704,638 @@ async function loadAll() {
     `(acc W ${session.accuracy_white} / B ${session.accuracy_black}) · ${session.num_mistakes} mistakes${sens}`;
   mistakes = session.mistakes;
   renderMistakeList();
+  renderScoreboard(session);
+  renderCoach(session);
+  // NB: prepareCoachAI() is intentionally NOT called here — it's run by the caller AFTER
+  // applyTimeline(), so it sees the new game's timeline (applySession runs before applyTimeline).
+}
 
-  const tl = await fetch("/api/timeline").then((r) => r.json());
+// Free, engine-grounded templated blurb (rides on /api/session) — always shown when present.
+function renderCoach(session) {
+  const el = $("coach");
+  if (!el) return;
+  const text = session && session.coach_summary;
+  el.textContent = text || "";
+  el.hidden = !text;
+}
+
+// Claude-written summary (board column, bottom). The card shows its state; the button offers
+// on-demand generation. Server caches per game, so re-requests don't spend Claude again.
+function showCoachButton(show) {
+  const btn = $("coach-ai-btn");
+  if (btn) btn.hidden = !show;
+}
+
+function setCoachAI(state, text) {
+  const el = $("coach-ai");
+  if (!el) return;
+  if (state === "hidden") {
+    el.hidden = true;
+    el.className = "coach-ai";
+    el.textContent = "";
+  } else if (state === "pending") {
+    el.hidden = false;
+    el.className = "coach-ai pending";
+    el.textContent = "Writing a fuller summary with Claude…";
+  } else if (state === "error") {
+    el.hidden = false;
+    el.className = "coach-ai err";
+    el.textContent = text || "Couldn't generate the summary.";
+  } else {
+    el.hidden = false;
+    el.className = "coach-ai";
+    // Render bold / italics / lists / paragraphs (same safe markdown as the chat answers).
+    el.innerHTML = `<span class="coach-ai-tag">AI coach (Snowie)</span>${renderMarkdown(text)}`;
+  }
+}
+
+// Set up the AI-summary UI for the freshly-loaded game: auto-generate, or just offer the button.
+function prepareCoachAI() {
+  coachAiToken++; // any earlier in-flight request is now stale
+  setCoachAI("hidden");
+  if (!timeline.length) { showCoachButton(false); return; }
+  if (coachAiAuto) fetchCoachAI();
+  else showCoachButton(true);
+}
+
+// Actually request the summary (button press, or the auto path). Always allowed — it only ever
+// runs from an explicit user choice, so it spends Claude only when asked.
+async function fetchCoachAI() {
+  const tok = ++coachAiToken;
+  showCoachButton(false);
+  setCoachAI("pending");
+  let res;
+  try {
+    res = await fetch("/api/coach", { method: "POST" }).then((r) => r.json());
+  } catch (_) {
+    if (tok === coachAiToken) { setCoachAI("error", "Couldn't reach the summary service."); showCoachButton(true); }
+    return;
+  }
+  if (tok !== coachAiToken) return; // a newer game superseded this request
+  if (res && res.summary) {
+    setCoachAI("ready", res.summary);
+  } else {
+    setCoachAI(res && res.error ? "error" : "hidden", res && res.error);
+    showCoachButton(true); // let the user retry
+  }
+}
+
+function applyTimeline(tl) {
   timeline = tl.nodes || [];
   player = tl.player || "white";
   orient = player; // orientation follows the reviewed side until the user flips (f)
   applyEvalBarTheme();
+  renderMoveList();
+}
 
+async function loadAll() {
+  // Identity + app-mode come from the server (settings-backed), so one source of truth.
+  try {
+    const cfg = await fetch("/api/app-config").then((r) => r.json());
+    appMode = !!cfg.app_mode;
+    appUsername = (cfg.default_username || "").trim();
+    coachAiAuto = !!cfg.coach_ai_auto;
+  } catch (_) {}
+  if (appUsername) $("lichess-user").placeholder = appUsername;
+  if (appMode) startHeartbeat(); // so closing this tab quits the standalone app
+
+  const session = await fetch("/api/session").then((r) => r.json());
+  if (session.empty) {
+    // App mode: try to auto-load the user's most recent Lichess game instead of an empty board.
+    if (appMode && (await maybeAutoload())) return;
+    $("game-meta").textContent =
+      "No game analysed yet — pick one from the Games panel, or run analyze_game.";
+    return;
+  }
+  applySession(session);
+  const tl = await fetch("/api/timeline").then((r) => r.json());
+  applyTimeline(tl);
   if (mistakes.length) selectMistake(session.current_index ?? 0);
   else gotoNode(0);
+  prepareCoachAI(); // timeline is set now → offer the button (or auto-generate)
+}
+
+// --- app mode: auto-open the latest Lichess game -------------------------
+// App mode: let the server know when this tab is really gone, so it (and its terminal window) can
+// quit. The reliable signal is `pagehide` → a close beacon; a slow heartbeat is just a backstop for
+// the rare case pagehide never fires. We deliberately do NOT treat "lost focus / backgrounded" as
+// closed — background tabs throttle timers, so a short heartbeat would false-quit during use.
+let heartbeatTimer = null;
+function startHeartbeat() {
+  if (heartbeatTimer) return;
+  const ping = () => fetch("/api/ping", { method: "POST", keepalive: true }).catch(() => {});
+  ping();
+  heartbeatTimer = setInterval(ping, 15000); // backstop only; server tolerates minutes of silence
+  // Fires on tab close, navigation, and refresh. sendBeacon delivers even as the page unloads.
+  window.addEventListener("pagehide", () => {
+    try {
+      navigator.sendBeacon("/api/closing");
+    } catch (_) {}
+  });
+}
+
+// App-mode empty board: auto-load the configured user's latest game, or prompt for a username.
+async function maybeAutoload() {
+  if (appUsername) await autoOpenLatest(appUsername);
+  else showFirstRun("");
+  return true;
+}
+
+// Persist the configured username server-side (unified identity) and reflect it locally.
+async function saveUsername(username) {
+  appUsername = (username || "").trim();
+  if (appUsername) $("lichess-user").placeholder = appUsername;
+  try {
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: appUsername }),
+    });
+  } catch (_) {}
+}
+
+// Infer which side `who` played in a Lichess game (same rule as renderHistory's lichess branch).
+function sideForUser(game, who) {
+  const w = (game.white || "").toLowerCase();
+  const b = (game.black || "").toLowerCase();
+  const me = (who || "").toLowerCase();
+  return me && w === me ? "white" : me && b === me ? "black" : "auto";
+}
+
+async function autoOpenLatest(username) {
+  $("game-meta").textContent = `Loading ${username}'s most recent Lichess game…`;
+  const q = new URLSearchParams({ username, max: "1" });
+  let data;
+  try {
+    data = await fetch("/api/lichess/games?" + q.toString()).then((r) => r.json());
+  } catch (_) {
+    $("game-meta").textContent = "Could not reach Lichess — pick a game from the Games panel.";
+    return;
+  }
+  if (data.error || !(data.games || []).length) {
+    $("game-meta").textContent = data.error
+      ? data.error
+      : `No Lichess games found for ${username} — pick one from the Games panel.`;
+    return;
+  }
+  const g = data.games[0];
+  openGame(g.pgn, sideForUser(g, username));
+}
+
+function showFirstRun(defaultUsername) {
+  const overlay = $("firstrun");
+  if (!overlay) return;
+  $("firstrun-user").value = defaultUsername || "";
+  overlay.hidden = false;
+  $("firstrun-user").focus();
+}
+
+// --- progressive open: navigate the PGN immediately, swap in engine analysis when ready ----
+// Build a provisional timeline from a PGN entirely client-side (chess.js), so the board is
+// steppable the instant a game is opened — no engine, no win%/classifications yet (those arrive
+// in phase 2). Shape matches the server timeline's navigation fields. Throws on an unparseable PGN.
+function buildProvisionalTimeline(pgn) {
+  const c = new Chess();
+  c.loadPgn(pgn);
+  const moves = c.history({ verbose: true });
+  if (!moves.length) throw new Error("no moves");
+  const nodes = moves.map((mv, i) => ({
+    node: i,
+    fen: mv.before,
+    win_white: null,
+    color: mv.color === "w" ? "white" : "black",
+    move_number: Math.floor(i / 2) + 1,
+    ply: i + 1,
+    move_san: mv.san,
+    move_uci: mv.from + mv.to + (mv.promotion || ""),
+    best_uci: null,
+    best_san: null,
+    classification: null,
+    mistake_index: null,
+  }));
+  const last = moves[moves.length - 1];
+  nodes.push({
+    node: moves.length,
+    fen: last.after,
+    win_white: null,
+    color: c.turn() === "w" ? "white" : "black",
+    move_number: Math.floor(moves.length / 2) + 1,
+  });
+  return nodes;
+}
+
+function setAnalyzingUI(on) {
+  $("best-toggle").disabled = on; // engine pool is busy with the sweep
+  if (on) {
+    bestArrowOn = false;
+    $("best-toggle").checked = false;
+  }
+  const box = $("analysis-progress");
+  if (box) box.hidden = !on;
+  if (on) renderProgress(null); // start indeterminate until the first status arrives
+}
+
+// Render the sweep progress bar over the win graph. `st` is the /analysis-status payload (or null
+// for the initial indeterminate state). We show a measured fill + ETA once the job reports a stable
+// per-ply rate (eta_seconds), and an indeterminate shimmer before that (engine pool warming up).
+function renderProgress(st) {
+  const fill = $("analysis-progress-fill");
+  const label = $("analysis-progress-label");
+  if (!fill || !label) return;
+  // Multi-game batch: prefix the per-game bar with "Game k of N".
+  const multi = st && (st.total_games || 1) > 1;
+  const prefix = multi ? `Game ${st.current_game} of ${st.total_games} · ` : "";
+  const done = st && st.total ? st.done : 0;
+  const total = st && st.total ? st.total : 0;
+  const eta = st ? st.eta_seconds : null;
+  if (!total || eta == null) {
+    fill.classList.add("indeterminate");
+    label.textContent = `${prefix}Analyzing… estimating time`;
+    return;
+  }
+  fill.classList.remove("indeterminate");
+  const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  fill.style.width = pct + "%";
+  const secs = Math.max(1, Math.round(eta));
+  label.textContent = `${prefix}Analyzing… ${pct}% · ~${secs}s left`;
+}
+
+// Set up the board to navigate a PGN immediately (provisional timeline, no engine yet) and reset
+// per-game UI state. Shared by single-game opens and the first game of a batch upload.
+function beginProvisional(pgn, side, metaText) {
+  analyzing = true;
+  currentMistake = -1;
+  anchorNode = 0;
+  mistakes = [];
+  currentPrompt = "";
+  $("comment").textContent = "";
+  $("verdict").innerHTML = "";
+  setAnalyzingUI(true);
+  renderMistakeList();
+  $("scoreboard").hidden = true; // stale until the new game's stats land in phase-2
+  $("coach").hidden = true;
+  coachAiToken++; // invalidate any in-flight AI summary from the previous game
+  setCoachAI("hidden");
+  showCoachButton(false);
+
+  let prov = null;
+  try {
+    prov = buildProvisionalTimeline(pgn);
+  } catch (_) {
+    prov = null; // unparseable PGN -> fall back to a blocking spinner (phase-2 still works)
+  }
+  if (prov && prov.length >= 2) {
+    timeline = prov;
+    player = side === "white" || side === "black" ? side : "white";
+    orient = player;
+    applyEvalBarTheme();
+    renderMoveList(); // provisional notation: navigable immediately, glyphs fill in later
+    gotoNode(0);
+    $("game-meta").textContent = metaText || "Analyzing… you can step through the moves now (← / →).";
+  } else {
+    timeline = [];
+    renderMoveList();
+    $("game-meta").textContent = "Analyzing…";
+  }
+}
+
+function openGame(pgn, side) {
+  batchInfo = null; // a single open is not a batch
+  beginProvisional(pgn, side);
+  fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pgn, player: side || "auto" }),
+  }).catch(() => {});
+  startPolling();
+}
+
+// Analyze a multi-game PGN (e.g. a Chess.com export): the backend splits + analyzes each game in
+// the background and records them to "My games"; we show the first game while the rest run.
+async function openBatch(pgnText, side, username) {
+  let res;
+  try {
+    res = await fetch("/api/analyze-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pgn: pgnText, player: side || "auto", username: username || "" }),
+    }).then((r) => r.json());
+  } catch (_) {
+    $("history-status").textContent = "Could not start analysis.";
+    return;
+  }
+  if (res.error || !res.total_games) {
+    $("history-status").textContent = res.error || "No valid games found in that PGN.";
+    return;
+  }
+  batchInfo = { total: res.total_games, self_handle: res.self_handle, lastDone: -1 };
+  const who = res.self_handle ? ` as ${res.self_handle}` : "";
+  $("history-status").textContent = `Analyzing ${res.total_games} games${who} → they'll appear in My games.`;
+  beginProvisional(res.first_pgn, res.first_side, `Analyzing game 1 of ${res.total_games}…`);
+  startPolling();
+}
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(async () => {
+    let st;
+    try {
+      st = await fetch("/api/analysis-status").then((r) => r.json());
+    } catch (_) {
+      return;
+    }
+    // Batch: surface each finished game in "My games" as it lands.
+    if (batchInfo && st.done_games != null && st.done_games !== batchInfo.lastDone) {
+      batchInfo.lastDone = st.done_games;
+      if (historyMode === "normal") loadHistory();
+    }
+    if (st.status === "ready") {
+      stopPolling();
+      onAnalysisReady();
+    } else if (st.status === "error" && (!batchInfo || (st.total_games || 1) === 1)) {
+      // A single-game failure is terminal; in a batch we keep going (error is just the last note).
+      stopPolling();
+      onAnalysisError(st.error);
+    } else {
+      renderProgress(st); // pending: advance the bar / ETA
+    }
+  }, 800);
+}
+function stopPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function onAnalysisReady() {
+  const prevCur = cur;
+  const session = await fetch("/api/session").then((r) => r.json());
+  const tl = await fetch("/api/timeline").then((r) => r.json());
+  if (session.empty) return; // superseded/cleared
+  analyzing = false;
+  setAnalyzingUI(false); // hides the progress bar
+  applySession(session);
+  applyTimeline(tl);
+  // Keep the user where they were navigating; if they hadn't moved, jump to the first mistake.
+  if (prevCur === 0 && mistakes.length) selectMistake(session.current_index ?? 0);
+  else gotoNode(clamp(prevCur, 0, timeline.length - 1));
+  prepareCoachAI(); // timeline is set now → offer the button (or auto-generate)
+  if (batchInfo) {
+    // Whole upload done: surface every game in "My games".
+    const n = batchInfo.total;
+    const who = batchInfo.self_handle ? ` as ${batchInfo.self_handle}` : "";
+    batchInfo = null;
+    activateTab("normal");
+    loadHistory(`Analyzed ${n} game${n === 1 ? "" : "s"}${who}. Showing the first below.`);
+  } else if (historyMode === "normal") {
+    loadHistory(); // the just-analyzed game now appears in the list
+  }
+}
+
+function onAnalysisError(msg) {
+  analyzing = false;
+  setAnalyzingUI(false);
+  renderGraph();
+  $("history-status").textContent = `Analysis failed: ${msg || "unknown error"}`;
+  $("game-meta").textContent = "Analysis failed — you can still step through the moves.";
+}
+
+// --- history / lichess panel ---------------------------------------------
+async function loadHistory(doneMsg) {
+  $("history-status").textContent = "Loading…";
+  let data;
+  try {
+    data = await fetch("/api/history").then((r) => r.json());
+  } catch (_) {
+    $("history-status").textContent = "Could not load history.";
+    return;
+  }
+  myPlayerId = data.player_id || myPlayerId;
+  if (myPlayerId) $("lichess-user").placeholder = myPlayerId;
+  historyGames = data.games || [];
+  historyCount = HISTORY_PAGE; // a fresh fetch resets paging back to the first page
+  renderMyGames();
+  $("history-status").textContent = historyGames.length ? doneMsg || "" : "No analyzed games yet.";
+}
+
+// Render the current page of "My games" into the (fixed-height, scrollable) list, with a
+// "Show more" row when there are extra games beyond what's shown. No refetch — pages a cached list.
+function renderMyGames() {
+  renderHistory(historyGames.slice(0, historyCount), "normal");
+  const remaining = historyGames.length - historyCount;
+  if (remaining > 0) {
+    const li = document.createElement("li");
+    li.className = "load-more";
+    li.textContent = `Show more (${remaining})`;
+    li.addEventListener("click", () => {
+      historyCount += HISTORY_PAGE;
+      renderMyGames();
+    });
+    $("history-list").appendChild(li);
+  }
+}
+
+async function loadLichess(username) {
+  lichessUser = username;
+  $("history-status").textContent = "Fetching from Lichess…";
+  const q = new URLSearchParams();
+  if (username) q.set("username", username);
+  q.set("max", String(lichessCount));
+  let data;
+  try {
+    data = await fetch("/api/lichess/games?" + q.toString()).then((r) => r.json());
+  } catch (_) {
+    $("history-status").textContent = "Could not reach Lichess.";
+    return;
+  }
+  if (data.error) {
+    $("history-status").textContent = data.error;
+    $("history-list").innerHTML = "";
+    return;
+  }
+  const games = data.games || [];
+  const who = (username || myPlayerId || "").toLowerCase();
+  reflectSetAsMe(who); // is the looked-up account already "me"?
+  renderHistory(games, "lichess", who);
+  $("history-status").textContent = games.length ? "" : "No games found.";
+  // While the server keeps returning a full page, there are probably more to fetch.
+  if (games.length >= lichessCount) {
+    const li = document.createElement("li");
+    li.className = "load-more";
+    li.textContent = "Load more";
+    li.addEventListener("click", () => {
+      lichessCount += LICHESS_PAGE;
+      loadLichess(lichessUser);
+    });
+    $("history-list").appendChild(li);
+  }
+}
+
+const resultClass = (r) => (r === "win" ? "win" : r === "loss" ? "loss" : r === "draw" ? "draw" : "");
+const resultWord = (r) => ({ win: "Won", loss: "Lost", draw: "Drew" }[r] || "");
+
+function renderHistory(games, mode, who) {
+  const ol = $("history-list");
+  ol.innerHTML = "";
+  for (const g of games) {
+    const li = document.createElement("li");
+    let side, title, sub, blunders, disabled, cls;
+    if (mode === "normal") {
+      side = g.reviewed_side;
+      const opp = side === "white" ? g.black : g.white;
+      cls = resultClass(g.player_result);
+      const acc = g.accuracy != null ? `${g.accuracy}%` : "?";
+      title = `${resultWord(g.player_result) || "vs"} ${opp || "?"}`;
+      sub = `${g.date || ""} · ${g.opening || "—"} · ${acc} · ${g.speed}`;
+      blunders = (g.counts && g.counts.blunder) || 0;
+      disabled = !g.has_pgn;
+    } else {
+      const w = (g.white || "").toLowerCase();
+      const b = (g.black || "").toLowerCase();
+      side = who && w === who ? "white" : who && b === who ? "black" : "auto";
+      cls = "";
+      title = `${g.white || "?"} vs ${g.black || "?"}`;
+      sub = `${g.date || ""} · ${g.opening || "—"} · ${g.speed} · ${g.result || ""}`;
+      blunders = null;
+      disabled = !g.pgn;
+    }
+    li.className = cls + (disabled ? " disabled" : "");
+    li.innerHTML =
+      `<div class="h-title"><span>${escapeHtml(title)}</span>` +
+      (blunders ? `<span class="h-blunders">●${blunders}</span>` : "") +
+      `</div><div class="h-sub">${escapeHtml(sub)}</div>`;
+    if (disabled) {
+      li.title =
+        mode === "normal"
+          ? "Can't reopen — this game was analyzed before PGNs were stored. Re-analyze it from Lichess."
+          : "No PGN available for this game.";
+    } else {
+      li.addEventListener("click", () => openGame(g.pgn, side));
+    }
+    ol.appendChild(li);
+  }
+}
+
+// Just the tab chrome (active button + which form/list is shown), no data fetch.
+function activateTab(mode) {
+  historyMode = mode;
+  $("mode-normal").classList.toggle("active", mode === "normal");
+  $("mode-lichess").classList.toggle("active", mode === "lichess");
+  $("mode-paste").classList.toggle("active", mode === "paste");
+  $("lichess-form").style.display = mode === "lichess" ? "flex" : "none";
+  $("paste-form").style.display = mode === "paste" ? "flex" : "none";
+  $("history-list").style.display = mode === "paste" ? "none" : "";
+}
+
+// Update the "Set as my account" button to reflect whether `who` (lowercased) is already you.
+function reflectSetAsMe(who) {
+  const btn = $("set-as-me");
+  if (!btn) return;
+  const isMe = !!appUsername && appUsername.toLowerCase() === who && !!who;
+  btn.disabled = isMe;
+  btn.textContent = isMe ? "✓ This is your account" : "Set as my account";
+}
+
+// --- settings panel ------------------------------------------------------
+async function openSettings() {
+  $("settings-status").textContent = "";
+  let data;
+  try {
+    data = await fetch("/api/settings").then((r) => r.json());
+  } catch (_) {
+    $("settings-status").textContent = "Could not load settings.";
+    $("settings").hidden = false;
+    return;
+  }
+  const s = data.settings || {};
+  $("set-username").value = s.username || "";
+  $("set-aliases").value = s.aliases || "";
+  $("set-token").value = s.lichess_token || "";
+  $("set-recent").value = s.profile_recent || "";
+  $("set-lifetime").value = s.profile_lifetime || "";
+  $("set-stockfish").value = s.stockfish_path || "";
+  $("set-coach-ai-auto").checked = !!s.coach_ai_auto; // auto-generate per game (default off)
+  $("set-sf-status").textContent = data.stockfish_ok
+    ? "Stockfish engine found ✓"
+    : "Stockfish not found — analysis won't run until this points at the engine.";
+  $("settings").hidden = false;
+  $("set-username").focus();
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  $("settings-status").textContent = "Saving…";
+  const patch = {
+    username: $("set-username").value.trim(),
+    aliases: $("set-aliases").value.trim(),
+    lichess_token: $("set-token").value.trim(),
+    profile_recent: $("set-recent").value.trim(),
+    profile_lifetime: $("set-lifetime").value.trim(),
+    stockfish_path: $("set-stockfish").value.trim(),
+    coach_ai_auto: $("set-coach-ai-auto").checked,
+  };
+  let res;
+  try {
+    res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then((r) => r.json());
+  } catch (_) {
+    $("settings-status").textContent = "Could not save settings.";
+    return;
+  }
+  if (res.error) {
+    $("settings-status").textContent = res.error;
+    return;
+  }
+  appUsername = (res.settings && res.settings.username) || "";
+  if (appUsername) $("lichess-user").placeholder = appUsername;
+  $("settings").hidden = true;
+  // Apply the auto-summary preference without clobbering a summary that's already shown/pending:
+  // only act when nothing's there yet (turn-on -> generate now; turn-off -> offer the button).
+  coachAiAuto = !!(res.settings && res.settings.coach_ai_auto);
+  const card = $("coach-ai");
+  const busy = card && !card.hidden && !card.classList.contains("err");
+  if (timeline.length && !busy) {
+    if (coachAiAuto) fetchCoachAI();
+    else { setCoachAI("hidden"); showCoachButton(true); }
+  } else if (!timeline.length) {
+    setCoachAI("hidden");
+    showCoachButton(false);
+  }
+  if (historyMode === "normal") loadHistory(); // identity may have changed -> refresh My games
+}
+
+function setMode(mode) {
+  activateTab(mode);
+  if (mode === "normal") {
+    loadHistory();
+  } else if (mode === "lichess") {
+    lichessCount = LICHESS_PAGE; // fresh search starts at the first page
+    loadLichess($("lichess-user").value.trim());
+  } else {
+    // paste: nothing to fetch; just a hint until they submit.
+    updatePasteHint();
+  }
+}
+
+// Count games in a PGN by its [Event headers (>=1: a header-less PGN is still one game).
+const countGames = (pgn) => Math.max(1, (pgn.match(/^\s*\[Event\b/gm) || []).length);
+
+function updatePasteHint() {
+  if (historyMode !== "paste") return;
+  const pgn = $("paste-pgn").value.trim();
+  if (!pgn) {
+    $("history-status").textContent = "Paste or upload a PGN (one or many games), then Analyze.";
+    return;
+  }
+  const n = countGames(pgn);
+  $("history-status").textContent =
+    n > 1 ? `${n} games detected — all will be analyzed into My games.` : "1 game ready to analyze.";
+}
+
+function toggleHistory() {
+  document.body.classList.toggle("history-hidden");
 }
 
 function init() {
@@ -587,7 +1368,78 @@ function init() {
     refreshBestMoves(); // starts the live search when on, clears arrows when off
   });
   $("graph").addEventListener("click", onGraphClick);
+  $("movelist-expand").addEventListener("click", toggleMoveList);
+  $("coach-ai-btn").addEventListener("click", fetchCoachAI);
   $("chat-form").addEventListener("submit", sendChat);
+
+  // Games panel: collapse toggle, mode slider, lichess lookup.
+  $("history-toggle").addEventListener("click", toggleHistory);
+  $("history-collapse").addEventListener("click", toggleHistory);
+  $("mode-normal").addEventListener("click", () => setMode("normal"));
+  $("mode-lichess").addEventListener("click", () => setMode("lichess"));
+  $("mode-paste").addEventListener("click", () => setMode("paste"));
+  // Paste-PGN: analyze any PGN (e.g. Chess.com), single or multi-game, without the Lichess fetch.
+  $("paste-upload").addEventListener("click", () => $("paste-file").click());
+  $("paste-file").addEventListener("change", (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      $("paste-pgn").value = reader.result || "";
+      updatePasteHint();
+    };
+    reader.readAsText(file);
+    e.target.value = ""; // allow re-selecting the same file later
+  });
+  $("paste-pgn").addEventListener("input", updatePasteHint);
+  $("paste-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const pgn = $("paste-pgn").value.trim();
+    if (!pgn) {
+      $("history-status").textContent = "Paste or upload a PGN first.";
+      return;
+    }
+    $("firstrun").hidden = true; // in case the first-run prompt was still up
+    $("history-status").textContent = "";
+    const side = $("paste-side").value || "auto";
+    const username = ($("paste-username").value || "").trim();
+    if (countGames(pgn) > 1) openBatch(pgn, side, username);
+    else openGame(pgn, side);
+  });
+  $("lichess-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    lichessCount = LICHESS_PAGE; // a new lookup starts fresh
+    loadLichess($("lichess-user").value.trim());
+  });
+  // "Set as my account": make the looked-up Lichess handle your unified identity.
+  $("set-as-me").addEventListener("click", async () => {
+    const u = ($("lichess-user").value.trim() || lichessUser || "").trim();
+    if (!u) return;
+    await saveUsername(u);
+    reflectSetAsMe((u || "").toLowerCase());
+    loadHistory(); // "My games" now resolves to this account
+  });
+  // First-run prompt (no configured account): open that user's latest game, optionally save it.
+  $("firstrun-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const u = $("firstrun-user").value.trim();
+    if (!u) return;
+    if ($("firstrun-remember").checked) await saveUsername(u);
+    $("firstrun").hidden = true;
+    autoOpenLatest(u);
+  });
+  // Settings panel.
+  $("settings-toggle").addEventListener("click", openSettings);
+  $("settings-cancel").addEventListener("click", () => ($("settings").hidden = true));
+  $("settings-form").addEventListener("submit", saveSettings);
+  // First-run escape for non-Lichess (e.g. Chess.com) users: jump straight to Paste PGN.
+  $("firstrun-paste").addEventListener("click", () => {
+    $("firstrun").hidden = true;
+    document.body.classList.remove("history-hidden"); // make sure the panel is visible
+    setMode("paste");
+    $("paste-pgn").focus();
+    $("game-meta").textContent = "Paste a PGN to analyze it.";
+  });
 
   window.addEventListener("keydown", (e) => {
     // Escape blurs the chat box (or any field) so board hotkeys work again.
@@ -627,6 +1479,7 @@ function init() {
   });
 
   loadAll();
+  loadHistory(); // populate the games panel regardless of whether a game is loaded
 }
 
 init();

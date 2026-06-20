@@ -1,12 +1,30 @@
 {
+  "_comment": {
+    "_about": "Config for the chess analysis MCP server. JSON has no real comments, so these '_comment' keys document each field. Claude Code ignores top-level keys it doesn't recognize, so this block is safe to keep.",
+    "command": "'uv' runs the server in an auto-managed environment: it downloads a compatible Python and installs the dependencies on first launch (from pyproject.toml), so this file is machine-independent and you should NOT need to edit the command. Install uv with the project's install script (see README 'Installation').",
+    "args": "'run --directory . python -m server.mcp_server' tells uv to use THIS project's environment and run the MCP server. Don't change this.",
+    "env": {
+      "STOCKFISH_PATH": "OPTIONAL. Path to the Stockfish binary. Leave it out and the server auto-detects a normal brew/apt install (or `stockfish` on your PATH). Only add an absolute path here if auto-detection fails.",
+      "CHESS_USERNAME": "Your main Lichess/Chess.com username, so the tool can tell which side is 'you' in a game.",
+      "CHESS_ALIASES": "OPTIONAL. Comma-separated list of any other handles you've played under, so old/alt accounts fold into one coaching profile.",
+      "LICHESS_TOKEN": "OPTIONAL. Lets the fetch_games/fetch_game tools import your Lichess games so you don't paste PGNs. Leave empty for anonymous access (fine for most). If you import a lot and start hitting rate limits (HTTP 429), paste a free Personal Access Token from https://lichess.org/account/oauth/token (no scopes needed) here — requests are then throttled per-token instead of per-IP.",
+      "CHESS_PROFILE_RECENT": "OPTIONAL. How many recent games feed the 'recent form' coaching profile.",
+      "CHESS_PROFILE_LIFETIME": "OPTIONAL. How many games feed the broader 'lifetime' profile ('all' for everything).",
+      "CHESS_DATA_DIR": "OPTIONAL. Where analyzed-game history + the analysis cache + settings live. You normally DON'T set this: by default it resolves to a per-user app-data folder (macOS: ~/Library/Application Support/Tintin AI Chess Analysis/data) that the double-click .app uses too, so games analyzed in Claude Code and in the app share one history/cache (no re-analysis, one coaching profile) automatically. Set an absolute path here only to force a custom location (e.g. <repo>/.chess-review to keep data inside this checkout); .mcp.json does NOT expand ~ or $HOME."
+    },
+    "_notice": "-------------------- SET CHESS_USERNAME BELOW; everything else is optional --------------------"
+  },
   "mcpServers": {
     "chess": {
-      "command": "/opt/miniconda3/envs/chess-review/bin/python",
-      "args": ["-m", "server.mcp_server"],
+      "command": "uv",
+      "args": ["run", "--directory", ".", "python", "-m", "server.mcp_server"],
       "env": {
-        "STOCKFISH_PATH": "/usr/local/bin/stockfish",
         "CHESS_USERNAME": "thedarktintin",
-        "CHESS_ALIASES": "thedarktintin2, your_other_handle"
+        "STOCKFISH_PATH": "",
+        "CHESS_ALIASES": "",
+        "LICHESS_TOKEN": "",
+        "CHESS_PROFILE_RECENT": "100",
+        "CHESS_PROFILE_LIFETIME": "all"
       }
     }
   }
