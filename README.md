@@ -80,7 +80,10 @@ play on **Lichess**, just give it your username and it loads your recent games f
 [Releases page](https://github.com/Chess-analysis-mcp/tintins-chess-analysis/releases)), drag it into
 **Applications**, and open it.
 
-- **First open:** it's unsigned, so macOS Gatekeeper needs **right-click → Open → Open** once.
+- **First open:** it's unsigned, so macOS blocks it once. Double-click it (you'll get a "cannot
+  verify" / "blocked" message — click **Done**), then go to **System Settings → Privacy &
+  Security**, scroll down to the message about the app, and click **Open Anyway → Open**. You only
+  do this once. *(On older macOS you can instead right-click the app → **Open** → **Open**.)*
 - The app installs Stockfish + its Python env on first run (needs internet once), then opens the
   board. Its environment and your games/settings live in
   `~/Library/Application Support/Tintin AI Chess Analysis/`, **outside** the app, so your data
@@ -144,7 +147,8 @@ Releases page ships:
 ./scripts/build_app.sh        # → Tintin's AI Chess Analysis.app (in the repo root)
 ```
 
-Drag it into **/Applications** and open it (first time: **right-click → Open**). The bundle is
+Drag it into **/Applications** and open it (first time, unsigned: double-click, then **System
+Settings → Privacy & Security → Open Anyway**). The bundle is
 immutable at runtime; its Python env + your data live under
 `~/Library/Application Support/Tintin AI Chess Analysis/`. To customise the icon, replace
 `assets/app_icon.png` (1024×1024) or drop an `assets/AppIcon.icns`, then rebuild. It still needs the

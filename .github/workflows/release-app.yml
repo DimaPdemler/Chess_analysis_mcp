@@ -47,6 +47,6 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --notes "macOS app build. Download the zip below, unzip, drag the .app into /Applications, then right-click → Open (unsigned app)." \
+            --notes "macOS app build. Download the zip below, unzip, drag the .app into /Applications. First open (unsigned app): double-click it, then go to System Settings → Privacy & Security and click 'Open Anyway'. You only do this once." \
             "Tintins-AI-Chess-Analysis-macos.zip" \
           || gh release upload "${GITHUB_REF_NAME}" "Tintins-AI-Chess-Analysis-macos.zip" --clobber

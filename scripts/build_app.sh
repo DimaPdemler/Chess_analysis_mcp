@@ -277,5 +277,5 @@ echo "Built: $APP"
 echo
 echo "Try it:   open \"$APP\""
 echo "Install:  drag it into /Applications (then double-click)."
-echo "First open may need right-click → Open (unsigned app)."
+echo "First open (unsigned app): double-click, then System Settings -> Privacy & Security -> Open Anyway."
 echo "Logs:     ~/Library/Application Support/Tintin AI Chess Analysis/launch.log"
