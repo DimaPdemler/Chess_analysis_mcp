@@ -129,6 +129,13 @@ $ICON_LINE
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- Accessory/agent app: no Dock icon, no menu bar. Our executable is a shell script that runs a
+	     server (the real UI is the browser tab), so it never registers with the window server. Without
+	     this, macOS shows the "still launching" Dock bounce indefinitely. LSUIElement (not
+	     LSBackgroundOnly) still lets the osascript error dialogs above display. The app quits itself
+	     via the app-liveness watchdog when the browser tab is closed, so no Dock icon is needed. -->
+	<key>LSUIElement</key>
+	<true/>
 </dict>
 </plist>
 PLIST

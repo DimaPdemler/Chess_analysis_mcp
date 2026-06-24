@@ -1313,7 +1313,9 @@ function renderHistory(games, mode, who) {
       disabled = !g.has_pgn;
       // Tint games recorded under the configured user ("you") so they stand out from games
       // analysed for someone else (e.g. an opponent-side review, or another account's PGN).
-      if (myPlayerId && g.player_id && g.player_id === myPlayerId) cls += " mine";
+      // The backend computes `is_me` against the CURRENT identity (so a chess.com game recorded
+      // before that handle was added to "me" still tints); fall back to the frozen id match.
+      if (g.is_me || (myPlayerId && g.player_id && g.player_id === myPlayerId)) cls += " mine";
     } else {
       const w = (g.white || "").toLowerCase();
       const b = (g.black || "").toLowerCase();

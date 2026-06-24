@@ -794,6 +794,10 @@ def history_rows(player_id: Optional[str] = None, data_dir: Optional[str] = None
         key=lambda r: r.get("analyzed_at", ""),
         reverse=True,
     )
+    # "Is this me?" is computed at READ time against the CURRENT identity config, not from the
+    # record's frozen player_id — so a game keyed by a raw handle (e.g. a chess.com game recorded
+    # before that handle was folded into "me") still tints once the handle is added in Settings.
+    me = my_player_id(data_dir)
     rows = []
     for r in records:
         pgn = r.get("pgn")
@@ -801,6 +805,14 @@ def history_rows(player_id: Optional[str] = None, data_dir: Optional[str] = None
             {
                 "game_id": r.get("game_id"),
                 "player_id": r.get("player_id"),  # lets the panel tint games that are "you"
+                "is_me": (
+                    r.get("player_id") == me
+                    or _resolves_to_me(
+                        r.get("player_name") or r.get("player_id") or "",
+                        r.get("platform"),
+                        data_dir,
+                    )
+                ),
                 "reviewed_side": r.get("reviewed_side"),
                 "white": r.get("white"),
                 "black": r.get("black"),
