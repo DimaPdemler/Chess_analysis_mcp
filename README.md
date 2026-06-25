@@ -103,13 +103,27 @@ gives you **`Tintin's AI Chess Analysis.app`**. Drag that into **Applications**,
   survives updates. Setup problems show in a dialog; logs go to that folder's `launch.log`.
 
 <a id="review-windows-linux"></a>
-**Windows / Linux — the double-click launcher.** From the repo folder, double-click:
+**Windows / Linux — the double-click launcher.** Three steps, no terminal, no GitHub account needed.
+
+**Step 1 — download the project as a ZIP.** On this project's GitHub page, scroll to the **top**,
+click the green **`< > Code`** button, and choose **Download ZIP** (see the circled buttons below).
+
+<p align="center">
+  <img src="docs/screenshots/install_image.png" alt="On the GitHub page, click the green 'Code' button near the top right, then 'Download ZIP'." width="560">
+</p>
+
+**Step 2 — unzip it.** Double-click the downloaded `.zip` to extract it. You'll get a folder named
+something like **`tintins-chess-analysis`** — open it. (On Windows, if it opens "inside" the zip
+first, drag the folder out to your Desktop, or right-click the zip → **Extract All**.)
+
+**Step 3 — double-click the launcher** inside that folder:
 
 - **Windows:** **`Tintin's AI Chess Analysis.bat`** (if SmartScreen warns: **More info → Run anyway**)
 - **Linux:** **`Tintin's AI Chess Analysis.command`**
 
-The **first launch** installs everything (uv + Stockfish + the env); every launch after opens
-straight to the board.
+The **first launch** installs everything (uv + Stockfish + the env) and can take a couple of
+minutes — a loading page opens in your browser while it works. Every launch after opens straight to
+the board.
 
 **Once the board is open (any platform), load a game from wherever you play** — via the **Games**
 panel (☰), which has three tabs:

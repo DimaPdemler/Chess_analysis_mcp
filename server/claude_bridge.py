@@ -53,6 +53,36 @@ class ChatError(Exception):
     """Raised with a user-facing message when the chat call can't complete."""
 
 
+# When headless `claude -p` runs without being signed in, it can't pop an interactive login
+# prompt, so it just emits the literal `/login` slash command as its `result` and stops — with
+# NO `is_error`, `subtype == "success"`, zero tokens and zero cost. That sails past the normal
+# error checks, so without this the user sees the raw `/login` JSON instead of a real message.
+_LOGIN_HINT = (
+    "The `claude` CLI on this machine isn't signed in, so the AI features can't run yet "
+    "(it answered with `/login` and never called the model — 0 tokens, $0). To fix it, open a "
+    "terminal and run `claude` once: choose “Claude account with subscription”, approve in the "
+    "browser, and paste the full code back in a SINGLE clean attempt — don't refresh the auth "
+    "tab or run `claude` twice, or the code's state won't match and you'll get “Invalid code”. "
+    "Then run `claude -p \"hi\"` to confirm it answers, and restart this app."
+)
+
+
+def _is_login_response(data: dict, answer: str) -> bool:
+    """True when this is the not-signed-in `/login` sentinel rather than a real answer.
+
+    Keyed on the `result` being exactly the `/login` slash command (optionally corroborated by
+    the zero-token/zero-cost signature) so a legitimate answer that merely *mentions* `/login`
+    isn't misclassified.
+    """
+    if answer.strip() != "/login":
+        return False
+    usage = data.get("usage") or {}
+    zero_tokens = (usage.get("input_tokens") in (0, None)) and (
+        usage.get("output_tokens") in (0, None)
+    )
+    return bool(zero_tokens or data.get("total_cost_usd") in (0, 0.0, None))
+
+
 def _child_env() -> dict:
     """Environment for the spawned `claude`.
 
@@ -310,6 +340,8 @@ def coach_summary_ai(sess, *, timeout: int = 120) -> str:
     except json.JSONDecodeError:
         raise ChatError(_friendly_error(proc.stdout))
     answer = (data.get("result") or "").strip()
+    if _is_login_response(data, answer):
+        raise ChatError(_LOGIN_HINT)
     if data.get("is_error") or data.get("subtype") not in (None, "success") or not answer:
         raise ChatError(_friendly_error(answer or proc.stdout))
     return answer
@@ -385,6 +417,8 @@ def ask(
         raise ChatError(_friendly_error(proc.stdout))
 
     answer = data.get("result") or ""
+    if _is_login_response(data, answer):
+        raise ChatError(_LOGIN_HINT)
     if data.get("is_error") or data.get("subtype") not in (None, "success"):
         raise ChatError(_friendly_error(answer or proc.stdout))
 
