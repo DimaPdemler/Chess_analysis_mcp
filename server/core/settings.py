@@ -79,7 +79,7 @@ def apply(settings: dict) -> None:
     if "player_elo" in settings:
         config.PLAYER_ELO = config._parse_elo(str(settings["player_elo"]))
     if "stockfish_path" in settings:
-        sp = (settings["stockfish_path"] or "").strip()
+        sp = config.clean_path(settings["stockfish_path"])
         if sp:
             config.STOCKFISH_PATH = shutil.which(sp) or sp
     if "coach_ai_auto" in settings:
@@ -123,6 +123,10 @@ def update(patch: dict, data_dir: Optional[str] = None) -> dict:
     for key in KEYS:
         if key in patch:
             settings[key] = patch[key]
+    # Normalise the Stockfish path before persisting so a quoted "Copy as path" paste
+    # (common on Windows) is stored clean, not just applied clean.
+    if "stockfish_path" in settings and settings["stockfish_path"]:
+        settings["stockfish_path"] = config.clean_path(settings["stockfish_path"])
     save(settings, data_dir)
     apply(settings)
     return effective()

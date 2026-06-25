@@ -64,6 +64,26 @@ def test_coach_ai_auto_toggle_persists(tmp_path, restore_config):
     assert settings.effective()["coach_ai_auto"] is True
 
 
+def test_clean_path_strips_surrounding_quotes():
+    # Windows "Copy as path" wraps in double-quotes; pasting verbatim must not break lookup.
+    assert config.clean_path('"C:\\chess\\stockfish.exe"') == "C:\\chess\\stockfish.exe"
+    assert config.clean_path("'/usr/local/bin/stockfish'") == "/usr/local/bin/stockfish"
+    assert config.clean_path('  "/usr/local/bin/stockfish"  ') == "/usr/local/bin/stockfish"
+    # Unquoted paths and blanks are untouched.
+    assert config.clean_path("/usr/local/bin/stockfish") == "/usr/local/bin/stockfish"
+    assert config.clean_path("") == ""
+    assert config.clean_path(None) == ""
+
+
+def test_update_strips_quotes_from_stockfish_path(tmp_path, restore_config):
+    d = str(tmp_path)
+    settings.update({"stockfish_path": '"/some/where/stockfish"'}, data_dir=d)
+    # Persisted clean, not with the literal quote characters.
+    saved = json.loads((tmp_path / "settings.json").read_text())["stockfish_path"]
+    assert saved == "/some/where/stockfish"
+    assert config.STOCKFISH_PATH == "/some/where/stockfish"
+
+
 def test_personalize_history_toggle_persists(tmp_path, restore_config):
     d = str(tmp_path)
     settings.update({"personalize_history": False}, data_dir=d)  # opt-out (default is on)

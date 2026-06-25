@@ -56,6 +56,20 @@ _COMMON_STOCKFISH_PATHS = [
 ]
 
 
+def clean_path(value: str | None) -> str:
+    """Normalise a user-entered filesystem path.
+
+    Strips whitespace and any surrounding quotes — Windows Explorer's "Copy as path"
+    wraps paths in double-quotes, and pasting that verbatim would make `shutil.which`
+    look for a file whose name literally contains the quote characters (so a perfectly
+    valid path reads as "not found"). Strips matching single/double quotes once.
+    """
+    s = (value or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    return s
+
+
 def _resolve_stockfish() -> str:
     """Best-effort path to the Stockfish binary.
 
@@ -65,7 +79,7 @@ def _resolve_stockfish() -> str:
     its own Stockfish is found with no config). Falls back to the bare name "stockfish" so
     the engine still raises a clear, actionable error (see stockfish_install_hint).
     """
-    explicit = os.environ.get("STOCKFISH_PATH", "").strip()
+    explicit = clean_path(os.environ.get("STOCKFISH_PATH"))
     if explicit:
         return shutil.which(explicit) or explicit
     found = shutil.which("stockfish")

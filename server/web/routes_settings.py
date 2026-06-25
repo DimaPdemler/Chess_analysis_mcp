@@ -40,7 +40,7 @@ class SettingsPatch(BaseModel):
 
 
 def _stockfish_ok(path: str) -> bool:
-    return bool(shutil.which((path or "").strip()))
+    return bool(shutil.which(config.clean_path(path)))
 
 
 @router.get("/settings")
@@ -84,7 +84,7 @@ def post_settings(patch: SettingsPatch) -> JSONResponse:
 
     # A new Stockfish path is the only setting with a side effect: validate it, then restart the
     # engine pool so the next analysis uses it. An unusable path is rejected before anything changes.
-    new_path = (data.get("stockfish_path") or "").strip()
+    new_path = config.clean_path(data.get("stockfish_path"))
     restart_engine = bool(new_path) and (shutil.which(new_path) or new_path) != config.STOCKFISH_PATH
     if new_path and not _stockfish_ok(new_path):
         return JSONResponse(
