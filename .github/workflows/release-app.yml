@@ -47,19 +47,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Fixed install boilerplate — identical on every release. ('EOF' quoted so $100 stays literal.)
-          BOILERPLATE="$(cat <<'EOF'
+          # Build the notes in a file via plain heredoc REDIRECTION (not $(...) command
+          # substitution — macOS runners ship bash 3.2, which mis-parses apostrophes in a
+          # heredoc-inside-command-substitution). 'EOF' quoted so $100 stays literal.
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          cat > "$NOTES_FILE" <<'EOF'
           macOS app build. Download the zip below, unzip, drag the .app into /Applications. First open (unsigned app): double-click it, then go to System Settings → Privacy & Security and click 'Open Anyway'. You only do this once. (This extra step exists only because the app isn't signed with an Apple Developer certificate — I'd rather not pay Apple's $100/year developer fee just to remove it.)
           EOF
-          )"
           # Per-release "What's new" comes from the annotated tag's own message, so each tag carries its notes.
           WHATS_NEW="$(git tag -l "${GITHUB_REF_NAME}" --format='%(contents:body)')"
-          NOTES="$BOILERPLATE"
           if [ -n "$WHATS_NEW" ]; then
-            NOTES="${BOILERPLATE}"$'\n\n'"### What's new in ${GITHUB_REF_NAME}"$'\n\n'"${WHATS_NEW}"
+            printf '\n### What'\''s new in %s\n\n%s\n' "${GITHUB_REF_NAME}" "${WHATS_NEW}" >> "$NOTES_FILE"
           fi
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --notes "$NOTES" \
+            --notes-file "$NOTES_FILE" \
             "Tintins-AI-Chess-Analysis-macos.zip" \
           || gh release upload "${GITHUB_REF_NAME}" "Tintins-AI-Chess-Analysis-macos.zip" --clobber
