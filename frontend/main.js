@@ -37,6 +37,7 @@ let evalShapes = []; // extra board shapes from the last /api/evaluate (e.g. red
 let chatFen = null;
 let chatMove = null;
 let chatSession = null; // claude -p session id, threaded across questions
+let chatGen = 0; // bumped on each game open; invalidates an in-flight restoreChat for the old game
 
 // History panel + progressive (navigate-while-analyzing) open.
 let analyzing = false; // true during phase 1: provisional PGN timeline, no engine evals yet
@@ -360,11 +361,21 @@ async function onUserMove(orig, dest) {
   refreshBestMoves(); // live best-move arrows for the new position
 
   $("verdict").innerHTML = `<span class="line">Evaluating…</span>`;
-  const res = await fetch("/api/evaluate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fen: fenBefore, move: uci }),
-  }).then((r) => r.json());
+  let res;
+  try {
+    const r = await fetch("/api/evaluate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fen: fenBefore, move: uci }),
+    });
+    if (!r.ok) throw new Error(`engine error (${r.status})`);
+    res = await r.json();
+  } catch (err) {
+    // Never leave the verdict stuck on "Evaluating…": surface the failure so the user
+    // can retry instead of thinking the board froze.
+    renderVerdict({ error: "Couldn't evaluate that move — the engine may be busy or restarting. Try again." });
+    return;
+  }
   renderVerdict(res);
   if (res.move) {
     setEvalBar(moverColor === "white" ? res.move.win_after : 100 - res.move.win_after);
@@ -410,12 +421,25 @@ function renderGraph() {
     .map((nd, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(val(nd)).toFixed(1)}`)
     .join(" ");
 
-  const mistakeDots = timeline
-    .filter((nd) => nd.mistake_index != null)
+  const flagged = timeline.filter((nd) => nd.mistake_index != null);
+  const mistakeDots = flagged
     .map(
       (nd) =>
         `<circle cx="${x(nd.node).toFixed(1)}" cy="${y(val(nd)).toFixed(1)}" r="3" ` +
         `fill="${classColor(nd.classification)}" vector-effect="non-scaling-stroke"/>`
+    )
+    .join("");
+
+  // Transparent, full-height click targets over each mistake (a ply-wide band) so clicking a dot
+  // reliably opens it via real SVG hit-testing — no fragile pixel math — while clicks elsewhere on
+  // the graph hit nothing. `data-mi` is the index into the mistakes array (see onGraphClick).
+  const half = GW / (n - 1) / 2;
+  const mistakeHits = flagged
+    .map(
+      (nd) =>
+        `<rect class="mdot-hit" data-mi="${nd.mistake_index}" pointer-events="all" ` +
+        `x="${(x(nd.node) - half).toFixed(1)}" y="0" width="${(half * 2).toFixed(1)}" ` +
+        `height="${GH}" fill="transparent"/>`
     )
     .join("");
 
@@ -440,7 +464,8 @@ function renderGraph() {
       : "") +
     mistakeDots +
     marker +
-    analyzingNote;
+    analyzingNote +
+    mistakeHits; // last = on top, so the transparent bands reliably catch clicks
 }
 
 function classColor(cls) {
@@ -457,12 +482,20 @@ function classGlyph(cls) {
   return g ? `<span class="glyph ${cls}">${g}</span>` : "";
 }
 
+// Clicking a flagged-mistake dot opens that mistake (same as the mistakes tab, via selectMistake) —
+// detected by real SVG hit-testing of the transparent bands drawn in renderGraph (robust to the
+// stretched viewBox). Clicking anywhere else on the graph scrubs to that ply (plain gotoNode jump).
 function onGraphClick(ev) {
+  const target = ev.target && ev.target.closest && ev.target.closest("[data-mi]");
+  if (target) {
+    selectMistake(Number(target.getAttribute("data-mi")));
+    return;
+  }
   const n = timeline.length;
   if (n < 2) return;
   const rect = $("graph").getBoundingClientRect();
   const frac = (ev.clientX - rect.left) / rect.width;
-  gotoNode(Math.round(frac * (n - 1)));
+  gotoNode(Math.round(frac * (n - 1))); // gotoNode clamps to a valid node
 }
 
 // --- mistakes list -------------------------------------------------------
@@ -661,6 +694,24 @@ function addChatMsg(cls, text) {
   return d;
 }
 
+// Repopulate the chat panel from the server's in-memory transcript for the current game, so
+// switching to another game and back shows the conversation you'd had. Best-effort: a failure
+// just leaves the (already-cleared) panel empty.
+async function restoreChat() {
+  const myGen = chatGen;
+  let hist;
+  try {
+    hist = await fetch("/api/chat-history").then((r) => r.json());
+  } catch (_) {
+    return;
+  }
+  if (myGen !== chatGen) return; // a newer game opened while we were fetching — don't clobber it
+  const msgs = (hist && hist.messages) || [];
+  $("chat-messages").innerHTML = "";
+  for (const m of msgs) addChatMsg(m.role === "bot" ? "bot" : "user", m.text);
+  chatSession = (hist && hist.session_id) || null;
+}
+
 async function sendChat(ev) {
   ev.preventDefault();
   const input = $("chat-input");
@@ -759,29 +810,48 @@ function setCoachAI(state, text) {
   } else {
     el.hidden = false;
     el.className = "coach-ai";
-    // Render bold / italics / lists / paragraphs (same safe markdown as the chat answers).
-    el.innerHTML = `<span class="coach-ai-tag">AI coach (Snowie)</span>${renderMarkdown(text)}`;
+    // Render bold / italics / lists / paragraphs (same safe markdown as the chat answers). The ⟳
+    // button re-runs the summary on demand (spends Claude) — handy if it's a stale saved one.
+    el.innerHTML =
+      `<span class="coach-ai-tag">AI coach (Snowie)` +
+      `<button id="coach-ai-refresh" class="coach-ai-refresh" type="button" ` +
+      `title="Regenerate this summary (uses your Claude subscription)" aria-label="Regenerate summary">⟳</button>` +
+      `</span>${renderMarkdown(text)}`;
+    const rb = $("coach-ai-refresh");
+    if (rb) rb.addEventListener("click", () => fetchCoachAI(true));
   }
 }
 
-// Set up the AI-summary UI for the freshly-loaded game: auto-generate, or just offer the button.
-function prepareCoachAI() {
+// Set up the AI-summary UI for the freshly-loaded game: show an already-saved summary outright,
+// else auto-generate (if enabled), else just offer the button.
+function prepareCoachAI(session) {
   coachAiToken++; // any earlier in-flight request is now stale
   setCoachAI("hidden");
   if (!timeline.length) { showCoachButton(false); return; }
+  // Already generated for this game (this session, or restored from the cache on reopen) → show it
+  // immediately, no button press and no second Claude call.
+  if (session && session.coach_ai_text) {
+    setCoachAI("ready", session.coach_ai_text);
+    showCoachButton(false);
+    return;
+  }
   if (coachAiAuto) fetchCoachAI();
   else showCoachButton(true);
 }
 
 // Actually request the summary (button press, or the auto path). Always allowed — it only ever
 // runs from an explicit user choice, so it spends Claude only when asked.
-async function fetchCoachAI() {
+async function fetchCoachAI(force = false) {
   const tok = ++coachAiToken;
   showCoachButton(false);
   setCoachAI("pending");
   let res;
   try {
-    res = await fetch("/api/coach", { method: "POST" }).then((r) => r.json());
+    res = await fetch("/api/coach", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force: !!force }),
+    }).then((r) => r.json());
   } catch (_) {
     if (tok === coachAiToken) { setCoachAI("error", "Couldn't reach the summary service."); showCoachButton(true); }
     return;
@@ -804,6 +874,17 @@ function applyTimeline(tl) {
 }
 
 async function loadAll() {
+  // A fresh app session starts the Snowie chat clean. The transcript lives server-side in memory,
+  // so a server that actually restarts is already empty — but if the same long-lived board is reused
+  // across app launches (e.g. an MCP-hosted board that didn't exit on tab-close), the old conversation
+  // would linger. A brand-new browser session (new launch / new tab) has no sessionStorage flag → wipe;
+  // a refresh keeps the flag → preserves the chat (so refresh never loses state).
+  try {
+    if (!sessionStorage.getItem("chessAppSession")) {
+      sessionStorage.setItem("chessAppSession", "1");
+      await fetch("/api/chat-reset", { method: "POST" }).catch(() => {});
+    }
+  } catch (_) {}
   // Identity + app-mode come from the server (settings-backed), so one source of truth.
   try {
     const cfg = await fetch("/api/app-config").then((r) => r.json());
@@ -831,7 +912,8 @@ async function loadAll() {
   applyTimeline(tl);
   if (mistakes.length) selectMistake(session.current_index ?? 0);
   else gotoNode(0);
-  prepareCoachAI(); // timeline is set now → offer the button (or auto-generate)
+  restoreChat(); // restore any in-memory Q&A for the game already on the board (e.g. after a refresh)
+  prepareCoachAI(session); // show a saved AI summary outright, else offer the button
 }
 
 // --- setup self-check banner ---------------------------------------------
@@ -1177,6 +1259,13 @@ function beginProvisional(pgn, side, metaText) {
   coachAiToken++; // invalidate any in-flight AI summary from the previous game
   setCoachAI("hidden");
   showCoachButton(false);
+  // Clear the chat panel for the new game; its prior in-memory transcript (if any) is restored
+  // in onAnalysisReady once the session is loaded. chatSession is reset so we don't thread the
+  // previous game's conversation into this one. Bumping chatGen invalidates any in-flight
+  // restoreChat from the game we're leaving, so a late response can't repopulate this panel.
+  chatGen++;
+  $("chat-messages").innerHTML = "";
+  chatSession = null;
 
   let prov = null;
   try {
@@ -1223,15 +1312,24 @@ function reviewOtherSide() {
   openGame(currentPgn, player === "white" ? "black" : "white");
 }
 
-function openGame(pgn, side) {
+async function openGame(pgn, side) {
   batchInfo = null; // a single open is not a batch
   closeHistoryDrawer(); // on small screens the drawer covers the board — get out of the way
   beginProvisional(pgn, side);
-  fetch("/api/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pgn, player: side || "auto" }),
-  }).catch(() => {});
+  // AWAIT the POST: jobs.start switches the server's session/job synchronously, so by the time it
+  // returns the status reflects THIS game. Polling before that could observe the *previous* game's
+  // lingering "ready" and load the wrong session (showing its chat/board). On a cache hit the server
+  // is already "ready", so we skip polling and render immediately.
+  let st = null;
+  try {
+    st = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pgn, player: side || "auto" }),
+    }).then((r) => r.json());
+  } catch (_) {}
+  if (st && st.status === "ready") { onAnalysisReady(); return; }
+  if (st && st.status === "error") { onAnalysisError(st.error); return; }
   startPolling();
 }
 
@@ -1304,7 +1402,8 @@ async function onAnalysisReady() {
   // Keep the user where they were navigating; if they hadn't moved, jump to the first mistake.
   if (prevCur === 0 && mistakes.length) selectMistake(session.current_index ?? 0);
   else gotoNode(clamp(prevCur, 0, timeline.length - 1));
-  prepareCoachAI(); // timeline is set now → offer the button (or auto-generate)
+  restoreChat(); // repopulate this game's in-memory Q&A (if we've chatted about it this session)
+  prepareCoachAI(session); // timeline is set now → show saved summary, auto-generate, or offer button
   if (batchInfo) {
     // Whole upload done: surface every game in "My games".
     const n = batchInfo.total;
@@ -1586,6 +1685,7 @@ async function openSettings() {
   $("set-ollama-status").textContent = "";
   $("set-ollama-pick-row").hidden = true; // picker only appears after a successful Detect
   $("set-coach-ai-auto").checked = !!s.coach_ai_auto; // auto-generate per game (default off)
+  $("set-coach-ai-persist").checked = s.coach_ai_persist !== false; // remember summaries (default on)
   $("set-personalize").checked = s.personalize_history !== false; // personalize chat (default on)
   $("set-sf-status").textContent = data.stockfish_ok
     ? "Stockfish engine found ✓"
@@ -1647,6 +1747,7 @@ async function saveSettings(e) {
     local_llm_base_url: $("set-local-llm-url").value.trim(),
     local_llm_model: $("set-local-llm-model").value.trim(),
     coach_ai_auto: $("set-coach-ai-auto").checked,
+    coach_ai_persist: $("set-coach-ai-persist").checked,
     personalize_history: $("set-personalize").checked,
   };
   // The Advanced fields are the source of truth (the dropdowns just fill them).

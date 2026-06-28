@@ -1,0 +1,60 @@
+name: Traffic stats snapshot
+
+# Snapshots GitHub download/clone/view stats daily and commits the CSVs to the
+# orphan `stats` branch. Runs in GitHub's cloud — no local machine needed.
+#
+# REQUIRES a repo secret `TRAFFIC_TOKEN`: a classic Personal Access Token with
+# the `repo` scope (the built-in GITHUB_TOKEN gets 403 on /traffic endpoints).
+# Create one at https://github.com/settings/tokens, then add it under
+# repo Settings -> Secrets and variables -> Actions -> New repository secret.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:        # lets you run it on demand from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: traffic-stats
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (for the collector script)
+        uses: actions/checkout@v4
+
+      - name: Prepare the stats branch in a worktree
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin stats >/dev/null 2>&1; then
+            git fetch origin stats
+            git worktree add stats-data origin/stats
+            git -C stats-data checkout -B stats origin/stats
+          else
+            echo "stats branch does not exist yet — creating it"
+            git worktree add --detach stats-data
+            git -C stats-data checkout --orphan stats
+            git -C stats-data reset --hard
+          fi
+
+      - name: Collect + upsert stats
+        env:
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+        run: |
+          python3 scripts/collect_traffic_stats.py --out-dir stats-data
+
+      - name: Commit + push if anything changed
+        run: |
+          cd stats-data
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "stats: snapshot $(date -u +%Y-%m-%d)"
+            git push origin stats
+          fi

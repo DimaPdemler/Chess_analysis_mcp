@@ -26,6 +26,7 @@ from server.core.evaluation import (
     move_accuracy,
     thresholds_for_elo,
     thresholds_for_speed,
+    time_control_clock,
     win_percent_from_score,
 )
 from server.core.session import MoveReview, ReviewSession
@@ -198,6 +199,11 @@ def analyze_game(
         board.push(node.move)
     final_board = board
 
+    # Time control base/increment, used to turn remaining-clock readings into time *spent* per
+    # move. None when the PGN has no sudden-death clock (correspondence, "-", etc.).
+    tc = time_control_clock(headers.get("TimeControl"))
+    tc_base, tc_increment = tc if tc else (None, 0.0)
+
     # Evaluate every position once: the position before each move, plus the final one. This is
     # the slow part of the sweep (one fixed-depth engine call per ply ⇒ roughly linear time), so
     # we report progress here for the web board's progress bar.
@@ -265,6 +271,16 @@ def analyze_game(
                 followup_san,
             )
 
+        # Time spent on this move = clock_before - clock_after + increment. clock_before is my
+        # remaining time after my *previous* move (two plies back), or the base for my first move.
+        # Needs [%clk] data; left None otherwise. Clamp to >= 0 to absorb clock-reading noise.
+        seconds_spent: float | None = None
+        if clocks[i] is not None:
+            prev_clock = clocks[i - 2] if i >= 2 else tc_base
+            if prev_clock is not None:
+                spent = prev_clock - clocks[i] + tc_increment
+                seconds_spent = round(spent, 1) if spent >= 0 else None
+
         review = MoveReview(
             ply=i + 1,
             move_number=before.fullmove_number,
@@ -286,6 +302,7 @@ def analyze_game(
             comment=comment,
             clock_after=clocks[i],
             opp_clock=clocks[i - 1] if i >= 1 else None,
+            seconds_spent=seconds_spent,
         )
         all_my_moves.append(review)
 

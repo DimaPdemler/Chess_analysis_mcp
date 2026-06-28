@@ -88,6 +88,9 @@ def get_session() -> dict:
     # The raw PGN, so the board can re-analyse this same game from the other side without a refetch.
     # Web-only (kept off summarize_session so the MCP tool output stays compact).
     summary["pgn"] = sess.pgn
+    # An already-generated AI coach summary (from this session or restored from cache), so reopening
+    # a game shows it immediately instead of making the user press "Generate". Web-only.
+    summary["coach_ai_text"] = sess.coach_ai_text
     return summary
 
 

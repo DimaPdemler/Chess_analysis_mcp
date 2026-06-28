@@ -17,6 +17,24 @@ from server.core.evaluation import classify
 from server.core.game_analysis import _signed_cp
 
 
+_PIECE_VALUES = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+}
+
+
+def material_balance(board: chess.Board, color: chess.Color) -> int:
+    """Net material in pawn-points from `color`'s perspective (+ = `color` is ahead)."""
+    total = 0
+    for piece_type, value in _PIECE_VALUES.items():
+        total += value * len(board.pieces(piece_type, color))
+        total -= value * len(board.pieces(piece_type, not color))
+    return total
+
+
 def eval_str(cp: int | None, mate: int | None) -> str:
     """Human-readable eval from the side-to-move perspective."""
     if mate is not None:
@@ -56,17 +74,64 @@ def parse_move(board: chess.Board, move: str) -> chess.Move:
     return board.parse_san(move)  # raises ValueError if illegal/ambiguous
 
 
+def _settle_leaf(after_board: chess.Board, pv_uci: list[str], depth: int) -> chess.Board:
+    """Play `pv_uci` out from `after_board`, then keep following best play until the position is
+    QUIET, so material is counted at a settled point — not mid-exchange.
+
+    The engine's PV ends at its search horizon, which can fall in the middle of a trade (e.g. the
+    line stops on `BxN` before the recapture `…PxB`). Counting material there reports a phantom
+    swing. We treat a leaf as non-quiet when the side to move is in check, or the last move was a
+    capture whose destination the side to move can recapture on, and resolve it by continuing the
+    engine's own best line (capped, so a perpetual sequence can't loop forever).
+    """
+    def push_pv(board: chess.Board, ucis: list[str]) -> bool:
+        """Push a PV; return whether the LAST pushed move was a capture."""
+        last_capture = False
+        for u in ucis:
+            try:
+                mv = chess.Move.from_uci(u)
+            except ValueError:
+                break
+            if mv not in board.legal_moves:
+                break
+            last_capture = board.is_capture(mv)
+            board.push(mv)
+        return last_capture
+
+    leaf = after_board.copy(stack=False)
+    last_capture = push_pv(leaf, pv_uci)
+    for _ in range(3):  # cap: at most a few extensions to settle the trade
+        pending_recapture = (
+            last_capture
+            and bool(leaf.move_stack)
+            and bool(leaf.attackers(leaf.turn, leaf.peek().to_square))
+        )
+        if not (leaf.is_check() or pending_recapture):
+            break  # quiet
+        cont = engine.analyse(leaf.fen(), depth=depth, multipv=1).best
+        if not cont.pv_uci:
+            break
+        last_capture = push_pv(leaf, cont.pv_uci)
+    return leaf
+
+
 def engine_line(
     fen: str,
     move: Optional[str] = None,
     depth: int = config.DEFAULT_DEPTH,
     multipv: int = 1,
+    settle_material: bool = False,
 ) -> dict:
     """Evaluate a position (optionally after a candidate move) and return engine lines.
 
     Without `move`, returns the best move and principal variation for `fen`. With `move`
     (UCI like "g1f3" or SAN like "Nf3"), also returns how that move is classified and the
     engine's refutation / expected continuation after it.
+
+    `settle_material` (off by default to keep the interactive board snappy) adds net-material
+    fields to the `move` dict, counted at a QUIESCENT leaf (see `_settle_leaf`) so a caller can
+    tell "loses a piece" from "loses tempo" without inferring it from the SAN line. It costs a few
+    extra engine calls when a trade is unresolved, so only the chat path enables it.
     """
     board = chess.Board(fen)
     base = engine.analyse(fen, depth=depth, multipv=max(1, multipv))
@@ -106,6 +171,13 @@ def engine_line(
 
         move_san = board.san(mv)
         win_before = best.win_percent  # best available for the mover
+        mover = board.turn
+        material_before = material_balance(board, mover) if settle_material else None
+        # Net material once the engine's expected continuation plays out, from the mover's
+        # perspective. Lets callers say "this loses a piece" vs "this only loses tempo" instead
+        # of inferring it from the SAN line. Filled (quiescently) from the refutation PV below;
+        # None for a move that ends the game (mate/stalemate) or when settle_material is off.
+        material_after_line: int | None = None
         after_board = board.copy(stack=False)
         after_board.push(mv)
 
@@ -128,6 +200,11 @@ def engine_line(
             refutation_uci = after.pv_uci[:12]
             refutation_san = pv_to_san(after_board, after.pv_uci)
             after_eval_cp = -round(_signed_cp(after.cp, after.mate))
+            # Walk the refutation line to a QUIESCENT leaf (resolving any trade left hanging at
+            # the engine's horizon), then count material from the mover's side.
+            if settle_material:
+                leaf = _settle_leaf(after_board, after.pv_uci, depth)
+                material_after_line = material_balance(leaf, mover)
 
         # Board annotation (Phase 7): draw the punishing reply as a red arrow so the board
         # shows *why* the move is bad, not just the prose.
@@ -149,6 +226,13 @@ def engine_line(
             "better_move_san": result["best_san"],
             "refutation_line_san": refutation_san,
             "refutation_line_uci": refutation_uci,
+            "material_before": material_before,
+            "material_after_line": material_after_line,
+            "material_delta": (
+                material_after_line - material_before
+                if material_after_line is not None
+                else None
+            ),
         }
 
     return result

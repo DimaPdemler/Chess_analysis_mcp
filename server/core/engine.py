@@ -54,6 +54,15 @@ class _EnginePool:
         self._started = False
         self._cache: dict[tuple[str, int, int], AnalysisResult] = {}
 
+    def _spawn_one(self) -> chess.engine.SimpleEngine:
+        """Start and configure one Stockfish process."""
+        try:
+            eng = chess.engine.SimpleEngine.popen_uci(config.STOCKFISH_PATH)
+        except FileNotFoundError as exc:
+            raise RuntimeError(config.stockfish_install_hint()) from exc
+        eng.configure({"Threads": config.ENGINE_THREADS, "Hash": config.ENGINE_HASH_MB})
+        return eng
+
     def _ensure_started(self) -> None:
         if self._started:
             return
@@ -61,14 +70,7 @@ class _EnginePool:
             if self._started:
                 return
             for _ in range(max(1, config.ENGINE_POOL_SIZE)):
-                try:
-                    eng = chess.engine.SimpleEngine.popen_uci(config.STOCKFISH_PATH)
-                except FileNotFoundError as exc:
-                    raise RuntimeError(config.stockfish_install_hint()) from exc
-                eng.configure(
-                    {"Threads": config.ENGINE_THREADS, "Hash": config.ENGINE_HASH_MB}
-                )
-                self._pool.put(eng)
+                self._pool.put(self._spawn_one())
             self._started = True
 
     def analyse(
@@ -87,30 +89,48 @@ class _EnginePool:
             return cached
 
         self._ensure_started()
-        eng = self._pool.get()
-        try:
-            board = chess.Board(fen)
-            infos = eng.analyse(
-                board, chess.engine.Limit(depth=depth), multipv=multipv
-            )
-            if isinstance(infos, dict):  # multipv=1 may return a single dict
-                infos = [infos]
-            lines: list[EngineLine] = []
-            for info in infos:
-                score = info["score"].pov(board.turn)  # side-to-move relative
-                lines.append(
-                    EngineLine(
-                        cp=score.score(),  # None if mate
-                        mate=score.mate(),  # None if cp
-                        pv_uci=[m.uci() for m in info.get("pv", [])],
-                    )
+        board = chess.Board(fen)
+        # A pooled engine whose process has died (crash, OOM, a stray `pkill stockfish`)
+        # raises EngineTerminatedError on use. If we just put it back, it poisons every
+        # later call. So on an engine-level failure we discard the broken process, spawn a
+        # fresh one, and retry once — the pool self-heals instead of getting stuck.
+        # Retry enough times to cycle past every engine in the pool, in case more than one
+        # process died at once (e.g. the whole pool was killed).
+        last_exc: chess.engine.EngineError | None = None
+        for attempt in range(max(1, config.ENGINE_POOL_SIZE) + 1):
+            eng = self._pool.get()
+            try:
+                infos = eng.analyse(
+                    board, chess.engine.Limit(depth=depth), multipv=multipv
                 )
-            result = AnalysisResult(fen=fen, depth=depth, lines=lines)
-        finally:
-            self._pool.put(eng)
+            except chess.engine.EngineError as exc:
+                last_exc = exc
+                try:
+                    eng.quit()  # best-effort; the process is likely already gone
+                except chess.engine.EngineError:
+                    pass
+                self._pool.put(self._spawn_one())  # replace, keep the pool size constant
+                continue
+            try:
+                if isinstance(infos, dict):  # multipv=1 may return a single dict
+                    infos = [infos]
+                lines: list[EngineLine] = []
+                for info in infos:
+                    score = info["score"].pov(board.turn)  # side-to-move relative
+                    lines.append(
+                        EngineLine(
+                            cp=score.score(),  # None if mate
+                            mate=score.mate(),  # None if cp
+                            pv_uci=[m.uci() for m in info.get("pv", [])],
+                        )
+                    )
+                result = AnalysisResult(fen=fen, depth=depth, lines=lines)
+            finally:
+                self._pool.put(eng)
+            self._cache[key] = result
+            return result
 
-        self._cache[key] = result
-        return result
+        raise RuntimeError(f"Stockfish engine failed: {last_exc}") from last_exc
 
     def shutdown(self) -> None:
         with self._lock:

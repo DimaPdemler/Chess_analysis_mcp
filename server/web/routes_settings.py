@@ -34,6 +34,7 @@ class SettingsPatch(BaseModel):
     player_elo: str | None = None
     stockfish_path: str | None = None
     coach_ai_auto: bool | None = None
+    coach_ai_persist: bool | None = None
     personalize_history: bool | None = None
     local_llm_base_url: str | None = None
     local_llm_model: str | None = None

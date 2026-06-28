@@ -260,6 +260,15 @@
 
         <details class="set-adv">
           <summary>Advanced</summary>
+          <label class="set-field set-check">
+            <span class="set-check-row">
+              <input id="set-coach-ai-persist" type="checkbox" />
+              <span class="set-label">Remember AI coach summaries between sessions</span>
+            </span>
+            <span class="set-hint">On (default): a generated Snowie summary is saved with the game, so
+              reopening it later shows the saved text instead of spending Claude to regenerate. Use the
+              ⟳ on the summary to re-run it anyway. Off: summaries regenerate each time you reopen.</span>
+          </label>
           <label class="set-field">
             <span class="set-label">Other accounts <span class="set-opt">(optional)</span></span>
             <input id="set-aliases" type="text" autocomplete="off" placeholder="my_other_lichess, another_handle" />

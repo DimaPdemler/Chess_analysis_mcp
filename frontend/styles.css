@@ -477,6 +477,18 @@ main {
   background: #5b57c4;
   color: #fff;
 }
+.coach-ai-refresh {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.8;
+}
+.coach-ai-refresh:hover { opacity: 1; transform: rotate(90deg); }
 
 .side-col { flex: 0 1 380px; width: 380px; min-width: 0; }
 .side-col h2 { font-size: 15px; margin: 0 0 8px; }

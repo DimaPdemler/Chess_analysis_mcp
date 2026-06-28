@@ -40,6 +40,10 @@ class MoveReview(BaseModel):
     # at their previous move. Powers the time-trouble motif.
     clock_after: Optional[float] = None
     opp_clock: Optional[float] = None
+    # Seconds the player actually spent on this move (clock_before - clock_after + increment),
+    # derived from [%clk] + the TimeControl increment. None when the PGN has no clocks. Lets the
+    # coach tell a long-think misjudgement from a blitzed-out / time-scramble blunder.
+    seconds_spent: Optional[float] = None
 
 
 class ReviewSession(BaseModel):

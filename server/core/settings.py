@@ -29,6 +29,7 @@ KEYS = (
     "player_elo",
     "stockfish_path",
     "coach_ai_auto",
+    "coach_ai_persist",
     "personalize_history",
     "local_llm_base_url",
     "local_llm_model",
@@ -84,6 +85,8 @@ def apply(settings: dict) -> None:
             config.STOCKFISH_PATH = shutil.which(sp) or sp
     if "coach_ai_auto" in settings:
         config.COACH_AI_AUTO = bool(settings["coach_ai_auto"])
+    if "coach_ai_persist" in settings:
+        config.COACH_AI_PERSIST = bool(settings["coach_ai_persist"])
     if "personalize_history" in settings:
         config.PERSONALIZE_HISTORY = bool(settings["personalize_history"])
     if "local_llm_base_url" in settings:
@@ -111,6 +114,7 @@ def effective() -> dict:
         "player_elo": "" if config.PLAYER_ELO is None else str(config.PLAYER_ELO),
         "stockfish_path": config.STOCKFISH_PATH or "",
         "coach_ai_auto": config.COACH_AI_AUTO,
+        "coach_ai_persist": config.COACH_AI_PERSIST,
         "personalize_history": config.PERSONALIZE_HISTORY,
         "local_llm_base_url": config.LOCAL_LLM_BASE_URL or "",
         "local_llm_model": config.LOCAL_LLM_MODEL or "",

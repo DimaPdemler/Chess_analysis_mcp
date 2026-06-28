@@ -116,6 +116,10 @@ def load(pgn: str, player: str = "auto") -> Optional[ReviewSession]:
         # Fresh open: drop any saved navigation state.
         sess.current_index = 0
         sess.explore_fen = None
+        # The AI coach summary is persisted inside this payload, but only honoured when the user
+        # has opted to remember summaries between sessions. Off -> drop it so it regenerates.
+        if not config.COACH_AI_PERSIST:
+            sess.coach_ai_text = None
         os.utime(path, None)  # mark as recently used for LRU pruning
         return sess
     except Exception:  # pragma: no cover - a bad cache file just means "miss"

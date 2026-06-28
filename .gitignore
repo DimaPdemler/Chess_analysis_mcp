@@ -56,3 +56,9 @@ chess_mcp_implementation_plan.md
 
 # Built macOS app bundle (scripts/build_app.sh; only the script is committed)
 *.app/
+
+# Personal GitHub download/traffic stats helper (not shipped to users)
+scripts/download_stats.sh
+
+# Local Claude Code guidance — kept out of the shared repo
+CLAUDE.md

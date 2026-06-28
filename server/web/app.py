@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from server import config
 from server.core import app_liveness
@@ -59,6 +60,21 @@ def _guard_is_active() -> bool:
     if host in ("", "0.0.0.0", "::"):
         return False
     return _is_local_host(_authority_host(host))
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """Serve the no-build frontend with `Cache-Control: no-cache` so browsers always REVALIDATE.
+
+    Plain `StaticFiles` emits an ETag/Last-Modified but no Cache-Control, so a browser may serve a
+    stale `main.js`/`styles.css` from heuristic cache without checking — meaning a JS/CSS edit
+    silently doesn't take effect until a hard refresh. `no-cache` (not `no-store`) keeps the cache
+    but forces revalidation: an unchanged file still returns a cheap 304, an edited one is refetched.
+    """
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
 
 
 def _resolve_frontend_dir() -> Path | None:
@@ -118,7 +134,7 @@ def create_app() -> FastAPI:
 
     # Mount the raw frontend last so /api/* routes win. html=True serves index.html at /.
     if _FRONTEND_DIR is not None:
-        app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+        app.mount("/", _NoCacheStaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
     else:
         # The UI wasn't packaged with this install — the board would 404 at `/`. Don't fail silently:
         # this is a packaging bug (see _resolve_frontend_dir), and a bare 404 is impossible to debug.

@@ -254,6 +254,13 @@ ANALYSIS_CACHE_MAX: int = int(os.environ.get("CHESS_ANALYSIS_CACHE_MAX", "1000")
 # each game opened; off by default (CHESS_COACH_AI_AUTO=1 to default it on).
 COACH_AI_AUTO: bool = os.environ.get("CHESS_COACH_AI_AUTO", "0") == "1"
 
+# Whether a generated AI coach summary is REMEMBERED across app restarts (persisted into the
+# analysis cache alongside the game) so reopening a game shows the saved summary instead of
+# spending the user's Claude subscription to regenerate it. On by default to save tokens; a
+# Settings → Advanced toggle and CHESS_COACH_AI_PERSIST=0 turn it off (regenerate each session).
+# The refresh (⟳) button on the summary card always forces a fresh write regardless.
+COACH_AI_PERSIST: bool = os.environ.get("CHESS_COACH_AI_PERSIST", "1") == "1"
+
 # Whether the in-browser "Ask your AI coach" chat injects the player's cross-game coaching profile
 # (recurring patterns from history) into the prompt. On by default; a Settings-panel toggle and
 # CHESS_PERSONALIZE_HISTORY=0 turn it off to send fewer tokens.

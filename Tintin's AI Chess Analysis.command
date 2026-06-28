@@ -61,15 +61,39 @@ PY
   disown 2>/dev/null || true
 }
 
+# Kill whatever is listening on our port (an old app instance, or a Claude Code MCP-hosted board that
+# squats the same port and never exits on tab-close). Used in a dev checkout so a relaunch always
+# runs the CURRENT code instead of re-attaching to a stale instance.
+free_port() {
+  command -v lsof >/dev/null 2>&1 || return 0
+  local pids
+  pids="$(lsof -ti "tcp:${PORT}" 2>/dev/null || true)"
+  [ -n "$pids" ] || return 0
+  kill $pids 2>/dev/null || true
+  for _ in 1 2 3 4 5 6; do
+    lsof -ti "tcp:${PORT}" >/dev/null 2>&1 || return 0
+    sleep 0.5
+  done
+  kill -9 $(lsof -ti "tcp:${PORT}" 2>/dev/null) 2>/dev/null || true
+  sleep 0.5
+}
+
 # Make a uv installed in the usual spots visible without a fresh login shell.
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
-# Already running? Just open the browser and stop — don't start a second server.
+# Already running?
 if curl -fsS "${URL}/api/app-config" >/dev/null 2>&1; then
-  echo "Tintin's AI Chess Analysis is already running — opening ${URL}"
-  open "$URL" 2>/dev/null || xdg-open "$URL" 2>/dev/null || true
-  close_window
-  exit 0
+  if [ -d ".git" ]; then
+    # Dev checkout: don't re-attach to the old instance — stop it and start fresh so this launch runs
+    # the latest code (and a clean Snowie chat). End-user installs (no .git) keep the reuse shortcut.
+    echo "Restarting Tintin's AI Chess Analysis with the latest code…"
+    free_port
+  else
+    echo "Tintin's AI Chess Analysis is already running — opening ${URL}"
+    open "$URL" 2>/dev/null || xdg-open "$URL" 2>/dev/null || true
+    close_window
+    exit 0
+  fi
 fi
 
 # Open a loading splash in the browser RIGHT NOW so first-time users see immediate progress while

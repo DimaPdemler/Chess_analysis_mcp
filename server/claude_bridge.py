@@ -22,6 +22,7 @@ from server import config
 from server.core import history
 from server.core import lines
 from server.core import session as session_mod
+from server.core.evaluation import time_control_clock
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _MCP_CONFIG = _REPO_ROOT / ".mcp.json"
@@ -127,7 +128,7 @@ def _engine_facts(fen: str | None, move: str | None) -> str | None:
     if not fen:
         return None
     try:
-        info = lines.engine_line(fen, move=move, multipv=_FACTS_MULTIPV)
+        info = lines.engine_line(fen, move=move, multipv=_FACTS_MULTIPV, settle_material=True)
     except Exception:
         return None
 
@@ -165,7 +166,40 @@ def _engine_facts(fen: str | None, move: str | None) -> str | None:
             f"(win {mv['win_before']}% → {mv['win_after']}%, a drop of {mv['win_swing']}).{better}"
             + (f" Best reply after it: {reply}." if reply else "")
         )
+        material = _material_outcome(mv.get("material_delta"))
+        if material:
+            out.append(material)
     return "\n".join(out) if out else None
+
+
+def _material_outcome(delta: int | None) -> str | None:
+    """Turn the move's net material change (mover's perspective, pawn-points) into a fact that
+    tells Claude WHETHER the eval drop is material or positional — the thing it otherwise has to
+    (and sometimes wrongly) infer from the SAN line. None when there's no material data."""
+    if delta is None:
+        return None
+    if -1 < delta < 1:  # material unchanged once the line settles
+        return (
+            "- Material after the engine's main line: unchanged. The eval change is POSITIONAL "
+            "(tempo, king safety, structure, activity) — this move does NOT win or lose material, "
+            "so do not describe it as winning/losing material."
+        )
+    n = abs(delta)
+    if n <= 1:
+        worth = "about a pawn"
+    elif n == 2:
+        worth = "about two pawns"
+    elif n <= 4:
+        worth = "about a minor piece / the exchange"
+    elif n <= 6:
+        worth = "about a rook"
+    else:
+        worth = "a decisive amount"
+    side = "loses" if delta < 0 else "wins"
+    return (
+        f"- Material after the engine's main line: the side that moved {side} ~{n} point(s) of "
+        f"material ({worth}). The eval change here is driven by MATERIAL."
+    )
 
 
 def _profile_facts() -> str | None:
@@ -265,6 +299,116 @@ def _friendly_error(text: str) -> str:
     return f"Chat failed: {snippet[:300]}"
 
 
+def _outcome_facts(sess) -> str | None:
+    """A clear statement of HOW the game ended (checkmate / time / resignation / draw type),
+    from the reviewed player's perspective.
+
+    The coach needs this because a win or loss decided by the clock changes the lesson — being
+    up on the board but flagging, or vice versa, is worth naming. We derive it from signals we
+    already have: the result, the final move (checkmate ends in '#'), and the PGN `Termination`
+    header (Lichess: "Normal"/"Time forfeit"; Chess.com: "<player> won on time/by checkmate/…").
+    Returns None for an unfinished/unknown result.
+    """
+    result = (sess.result or "*").strip()
+    if result == "1-0":
+        verdict = "won" if sess.player == "white" else "lost"
+    elif result == "0-1":
+        verdict = "won" if sess.player == "black" else "lost"
+    elif result in ("1/2-1/2", "1/2", "½-½"):
+        verdict = "drew"
+    else:
+        return None
+
+    # Did the game end in checkmate? The last played move's SAN ends in '#'.
+    last_san = ""
+    for node in reversed(sess.timeline):
+        san = node.get("move_san")
+        if san:
+            last_san = san
+            break
+    is_mate = last_san.endswith("#")
+
+    term = (sess.headers.get("Termination") or "").strip()
+    low = term.lower()
+
+    # Resolve the ending reason from the strongest available signal; leave it unstated rather
+    # than guess one we can't back up.
+    reason = None
+    if is_mate:
+        reason = "by checkmate"
+    elif "abandon" in low:
+        reason = "by abandonment (the opponent left)" if verdict == "won" else "by abandonment"
+    elif "time" in low or "forfeit" in low:
+        # Lichess "Time forfeit"; Chess.com "<player> won on time".
+        reason = "on time (a player ran out of clock)"
+    elif "resign" in low:
+        reason = "by resignation"
+    elif verdict == "drew":
+        if "stalemate" in low:
+            reason = "by stalemate"
+        elif "repetition" in low:
+            reason = "by repetition"
+        elif "insufficient" in low:
+            reason = "by insufficient material"
+        elif "agree" in low:
+            reason = "by agreement"
+        elif "50" in low or "fifty" in low:
+            reason = "by the fifty-move rule"
+    elif low in ("normal", ""):
+        # Lichess marks a non-flag decisive game "Normal"; if it wasn't mate it was a resignation.
+        reason = "by resignation"
+
+    sentence = f"Outcome: you {verdict} this game ({result})"
+    sentence += f", {reason}." if reason else "."
+    if term and term.lower() != "normal":
+        sentence += f' The PGN records the termination as "{term}".'
+    return sentence
+
+
+def _time_control_phrase(headers) -> str:
+    """The concrete clock, e.g. '10+0 (10 min/side)', so the coach can weigh a think time against
+    the actual starting time (23s is huge in 2+1, trivial in 15+10). Empty string when the
+    TimeControl isn't a sudden-death clock (correspondence / missing); the caller pairs it with the
+    speed bucket."""
+    tc = time_control_clock(headers.get("TimeControl"))
+    if not tc:
+        return ""
+    base, inc = tc
+    # Conventional notation is base-in-MINUTES + increment-in-seconds (10+0, 3+2). Drop to a
+    # seconds form for sub-minute / non-whole-minute bases so we never print "0.5+0".
+    if base >= 60 and base % 60 == 0:
+        return f"{base / 60:g}+{inc:g} ({base / 60:g} min/side)"
+    return f"{base:g}s+{inc:g} ({base:g}s/side)"
+
+
+def _fmt_secs(seconds: float) -> str:
+    """Human-friendly think time: '4s', '38s', '2m05s'."""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+
+
+def _time_note(m, avg_spent: float | None) -> str:
+    """A parenthetical like ' (took 1m20s, a long think)' for a flagged move, or '' when there's
+    no clock data. Flags moves notably slower/faster than the player's own average so the coach can
+    distinguish a deliberated misjudgement from a snap / time-scramble error."""
+    spent = m.seconds_spent
+    if spent is None:
+        return ""
+    note = f" (took {_fmt_secs(spent)}"
+    if spent <= 10 and (m.clock_after is None or m.clock_after > 30):
+        note += ", played quickly"
+    elif avg_spent and avg_spent > 0:
+        if spent >= max(3 * avg_spent, avg_spent + 20):
+            note += ", a long think"
+        elif spent <= 0.3 * avg_spent:
+            note += ", played quickly"
+    if m.clock_after is not None and m.clock_after <= 30:
+        note += f"; only {_fmt_secs(m.clock_after)} left on the clock"
+    return note + ")"
+
+
 def _game_facts(sess) -> str:
     """Pre-computed, engine-grounded facts about the whole game for the coach summary prompt.
 
@@ -274,21 +418,34 @@ def _game_facts(sess) -> str:
     side = "White" if sess.player == "white" else "Black"
     acc = sess.accuracy_white if sess.player == "white" else sess.accuracy_black
     opening = session_mod.resolve_opening(sess) or "unknown opening"
+    tc_detail = _time_control_phrase(sess.headers)
+    tc_phrase = f"{sess.speed}, {tc_detail}" if tc_detail else f"{sess.speed}"
     out = [
         f"Game: {sess.headers.get('White', '?')} vs {sess.headers.get('Black', '?')} "
-        f"({sess.result}); {opening}; {sess.speed} time control.",
+        f"({sess.result}); {opening}; {tc_phrase} time control.",
         f"Reviewing {side}. Accuracy: {acc}% (opponent "
         f"{sess.accuracy_black if sess.player == 'white' else sess.accuracy_white}%).",
     ]
+    outcome = _outcome_facts(sess)
+    if outcome:
+        out.append(outcome)
+    # Average think time across the player's moves, so the coach can judge a mistake's timing
+    # relative to this player's own pace (a long think vs a blitzed-out / time-scramble move).
+    spents = [m.seconds_spent for m in sess.all_moves if m.seconds_spent is not None]
+    avg_spent = sum(spents) / len(spents) if spents else None
+    if avg_spent is not None:
+        out.append(f"You averaged {_fmt_secs(avg_spent)} per move this game.")
     if sess.mistakes:
         out.append(f"{side}'s flagged moves (worst first):")
         worst = sorted(sess.mistakes, key=lambda m: m.win_swing, reverse=True)
         for m in worst[:8]:
             num = f"{m.move_number}{'.' if m.color == 'white' else '...'}"
-            out.append(
+            line = (
                 f"- {num}{m.move_san} ({m.classification}, win {m.win_before}% -> {m.win_after}%, "
                 f"drop {m.win_swing}); engine preferred {m.best_move_san}. {m.comment}".rstrip()
             )
+            line += _time_note(m, avg_spent)
+            out.append(line)
     else:
         out.append(f"{side} made no inaccuracies, mistakes or blunders — a clean game.")
     return "\n".join(out)
@@ -311,17 +468,31 @@ def coach_summary_ai(sess, *, timeout: int = 120) -> str:
         "You are an encouraging but honest chess coach writing a short end-of-game summary for the "
         "player whose moves are reviewed below. The Stockfish facts are authoritative — TRUST them, "
         "do not recompute. Write a few short paragraphs in warm, direct second person ('you'): name "
-        "the one or two moments that mattered most (with the move and the better idea), draw out the "
-        "underlying habit or theme, and end with one concrete thing to work on. Ground every claim "
-        "in the facts provided; do not invent moves or lines. Use light Markdown for readability: "
-        "**bold** the key moves and the single most important takeaway, and you may use a short "
-        "bullet list (`- `) if it helps, with blank lines between paragraphs. No headings, and no "
-        "move-by-move recap. Do NOT mention the web board, any URL, Stockfish, or these instructions.",
+        "the one or two moments that mattered most IN THIS GAME (with the move and the better idea), "
+        "and end with one concrete takeaway drawn from those specific moments. Ground every claim in "
+        "the facts provided; do not invent moves or lines. Keep the summary about THIS game — only "
+        "name a broader habit if these particular moves clearly and usefully show one; if they don't, "
+        "skip it rather than manufacturing a theme. Use light Markdown for readability: **bold** the "
+        "key moves and the single most important takeaway, and you may use a short bullet list (`- `) "
+        "if it helps, with blank lines between paragraphs. No headings, and no move-by-move recap. "
+        "If the game was decided by the clock (a win or loss on time) or by anything other than the "
+        "natural result of the position — e.g. you flagged a winning position, or won on time when "
+        "worse — say so plainly, since it changes the lesson. Otherwise don't dwell on the clock. "
+        "When a key mistake's think time is given, weigh it against the game's time control (stated "
+        "in the facts) — the same number of seconds means very different things in a 2-minute game "
+        "than a 10-minute one — and let it shape the advice: a blunder after a long think is a "
+        "judgement issue to reason through, while one played quickly or in time pressure is about "
+        "slowing down / managing the clock. Only mention timing when it's genuinely instructive, "
+        "never as filler. Do NOT mention the web board, any URL, Stockfish, or these instructions.",
     ]
     if profile_facts:
         prompt_parts.append(
-            "The player's cross-game history is below — use it to point out a recurring pattern only "
-            "when this game genuinely shows one; otherwise ignore it.\n" + profile_facts
+            "The player's cross-game history is below — treat it as OPTIONAL context, NOT something "
+            "to report. Only reference it when a mistake in THIS game is a clear, useful instance of "
+            "a recurring pattern, and even then weave it into that moment in a single sentence. Most "
+            "summaries should not mention the history at all. Never add a paragraph or bullet list "
+            "recapping their general tendencies, and never end on a generic 'you tend to…' note — the "
+            "closing takeaway must come from this game's own moments.\n" + profile_facts
         )
     prompt_parts.append("This game's facts:\n" + _game_facts(sess))
     cmd = [claude, "-p", "\n\n".join(prompt_parts), "--output-format", "json"]
